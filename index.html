@@ -472,120 +472,193 @@ async function logImport(uid,source,days,filename){
 
 /* -- Import Tab Component -- */
 
+const TONNAGE_SQL=`SELECT
+  w.date::date as date,
+  w.day,
+  w.plan_version,
+  w.workout_name,
+  ROUND(SUM(COALESCE(s.kg, 0) * COALESCE(s.reps, 0))::numeric, 0) as tonnage
+FROM workouts w
+JOIN exercise_logs e ON e.workout_id = w.id
+JOIN set_logs s ON s.exercise_log_id = e.id
+WHERE s.is_warmup = false
+GROUP BY w.date::date, w.day, w.plan_version, w.workout_name
+ORDER BY date;`;
+
+const DEFAULT_CUTOFF='2026-01-01';
+
 function ImportTab({user,toast}){
   const[active,setActive]=useState(null);
   const[pasted,setPasted]=useState('');
   const[feedback,setFeedback]=useState(null);
   const[importing,setImporting]=useState(false);
   const[logs,setLogs]=useState([]);
+  const[garminStatus,setGarminStatus]=useState(null);
+  const fileRef=useRef(null);
+  const fddbRef=useRef(null);
 
-  // Load import log
+  // Load cutoff from localStorage
+  const getCutoff=()=>{try{return localStorage.getItem('ut_cutoff')||DEFAULT_CUTOFF}catch(e){return DEFAULT_CUTOFF}};
+
   useEffect(()=>{
     sb.from('import_log').select('*').eq('user_id',user.id).order('imported_at',{ascending:false}).limit(10).then(({data})=>setLogs(data||[]));
   },[user.id]);
 
-  const sources=[
-    {id:'fddb',title:'fddb',sub:'Tagebuch CSV — Ernährung',icon:'🍎',kind:'paste',
-      placeholder:'"06.05.2026 17:05";"100 g Pudding";"833691";"615";"0";"2,3";"24";"4,9"'},
-    {id:'garmin-uds',title:'Garmin Schritte',sub:'UDS JSON — Schritte + kcal burned',icon:'👣',kind:'paste',
-      placeholder:'[{"calendarDate":"2026-05-08","totalKilocalories":1789,"totalSteps":4554}]'},
-    {id:'garmin-act',title:'Garmin Aktivitäten',sub:'Activities JSON — Training',icon:'🏃',kind:'paste',
-      placeholder:'{"data":[{"summarizedActivitiesExport":[...]}]}'},
-    {id:'garmin-cycle',title:'Garmin Zyklus',sub:'MenstrualCycles JSON — Zyklustag',icon:'📅',kind:'paste',
-      placeholder:'[{"startDate":"2026-04-09","actualCycleLength":28}]'},
-    {id:'tonnage',title:'Workout Tonnage',sub:'SQL-CSV-Export aus Workout Tracker',icon:'🏋️',kind:'paste',
-      placeholder:'date,day,tonnage\n2026-05-07,1,11240'},
-  ];
+  // Filter days by cutoff
+  const filterCutoff=(days)=>{const c=getCutoff();return days.filter(d=>d.date>=c)};
 
-  const doImport=async(s)=>{
+  // --- fddb file upload ---
+  const handleFddbFile=async(e)=>{
+    const file=e.target.files?.[0];if(!file)return;
+    setImporting(true);setFeedback(null);
+    try{
+      const text=await file.text();
+      let days=parseFddb(text);
+      days=filterCutoff(days);
+      if(!days.length){toast('Keine gültigen Tage gefunden (min. 1600 kcal, nach Cut-off)');setImporting(false);return}
+      const result=await importFddb(user.id,days);
+      await logImport(user.id,'fddb',days,file.name);
+      const dates=days.map(d=>d.date).sort();
+      setFeedback({source:'fddb',msg:`${days.length} Tage importiert — ${result.updated} aktualisiert, ${result.created} neu.`,range:fmtRange(dates[0],dates[dates.length-1])});
+      const{data:newLogs}=await sb.from('import_log').select('*').eq('user_id',user.id).order('imported_at',{ascending:false}).limit(10);
+      setLogs(newLogs||[]);
+    }catch(e){console.error(e);toast('Fehler: '+e.message)}
+    setImporting(false);
+    if(fddbRef.current)fddbRef.current.value='';
+  };
+
+  // --- Garmin ZIP upload ---
+  const handleGarminZip=async(e)=>{
+    const file=e.target.files?.[0];if(!file)return;
+    setImporting(true);setFeedback(null);setGarminStatus('ZIP wird geladen...');
+    try{
+      const JSZip=(await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm')).default;
+      const zip=await JSZip.loadAsync(file);
+      const results=[];let totalDays=0;
+
+      setGarminStatus('Dateien werden gesucht...');
+
+      // Find UDS file
+      const udsFile=Object.keys(zip.files).find(f=>f.includes('UDSFile_')&&f.endsWith('.json'));
+      if(udsFile){
+        setGarminStatus('Schritte & kcal werden importiert...');
+        const udsText=await zip.files[udsFile].async('string');
+        let days=parseGarminUDS(udsText);days=filterCutoff(days);
+        if(days.length){const r=await importGarminUDS(user.id,days);results.push(`Schritte: ${days.length} Tage`);totalDays+=days.length;await logImport(user.id,'garmin',days,'UDS')}
+      }
+
+      // Find Activities file
+      const actFile=Object.keys(zip.files).find(f=>f.includes('summarizedActivities')&&f.endsWith('.json'));
+      if(actFile){
+        setGarminStatus('Aktivitäten werden importiert...');
+        const actText=await zip.files[actFile].async('string');
+        let days=parseGarminActivities(actText);days=filterCutoff(days);
+        if(days.length){const r=await importGarminActivities(user.id,days);results.push(`Aktivitäten: ${days.length} Tage`);totalDays+=days.length;await logImport(user.id,'garmin',days,'Activities')}
+      }
+
+      // Find MenstrualCycles file
+      const cycFile=Object.keys(zip.files).find(f=>f.includes('MenstrualCycles')&&f.endsWith('.json'));
+      if(cycFile){
+        setGarminStatus('Zyklusdaten werden importiert...');
+        const cycText=await zip.files[cycFile].async('string');
+        let days=parseGarminCycles(cycText);days=filterCutoff(days);
+        if(days.length){const r=await importGarminCycles(user.id,days);results.push(`Zyklus: ${days.length} Tage`);totalDays+=days.length;await logImport(user.id,'garmin',days,'MenstrualCycles')}
+      }
+
+      if(!results.length){toast('Keine relevanten Dateien im ZIP gefunden')}
+      else{
+        setFeedback({source:'garmin',msg:`${results.join(' · ')}`,range:`${totalDays} Einträge gesamt`});
+        const{data:newLogs}=await sb.from('import_log').select('*').eq('user_id',user.id).order('imported_at',{ascending:false}).limit(10);
+        setLogs(newLogs||[]);
+      }
+    }catch(e){console.error(e);toast('Fehler: '+e.message)}
+    setImporting(false);setGarminStatus(null);
+    if(fileRef.current)fileRef.current.value='';
+  };
+
+  // --- Tonnage paste import ---
+  const doTonnageImport=async()=>{
     if(!pasted.trim()){toast('Keine Daten eingefügt');return}
     setImporting(true);setFeedback(null);
     try{
-      let days,result;
-      if(s.id==='fddb'){
-        days=parseFddb(pasted);
-        if(!days.length){toast('Keine gültigen Tage gefunden (min. 1600 kcal)');setImporting(false);return}
-        result=await importFddb(user.id,days);
-        await logImport(user.id,'fddb',days,'fddb_tagebuch.csv');
-      }else if(s.id==='garmin-uds'){
-        days=parseGarminUDS(pasted);
-        if(!days.length){toast('Keine Tage gefunden');setImporting(false);return}
-        result=await importGarminUDS(user.id,days);
-        await logImport(user.id,'garmin',days,'UDS JSON');
-      }else if(s.id==='garmin-act'){
-        days=parseGarminActivities(pasted);
-        if(!days.length){toast('Keine Aktivitäten gefunden');setImporting(false);return}
-        result=await importGarminActivities(user.id,days);
-        await logImport(user.id,'garmin',days,'Activities JSON');
-      }else if(s.id==='garmin-cycle'){
-        days=parseGarminCycles(pasted);
-        if(!days.length){toast('Keine Zyklusdaten gefunden');setImporting(false);return}
-        result=await importGarminCycles(user.id,days);
-        await logImport(user.id,'garmin',days,'MenstrualCycles JSON');
-      }else if(s.id==='tonnage'){
-        days=parseTonnage(pasted);
-        if(!days.length){toast('Keine Tonnage-Daten gefunden');setImporting(false);return}
-        result=await importTonnage(user.id,days);
-        await logImport(user.id,'tonnage',days,'workouts.csv');
-      }
+      let days=parseTonnage(pasted);days=filterCutoff(days);
+      if(!days.length){toast('Keine Tonnage-Daten gefunden');setImporting(false);return}
+      const result=await importTonnage(user.id,days);
+      await logImport(user.id,'tonnage',days,'workouts.csv');
       const dates=days.map(d=>d.date).sort();
-      const rangeStr=fmtRange(dates[0],dates[dates.length-1]);
-      setFeedback({source:s.id,msg:`${days.length} Tage importiert — ${result.updated} aktualisiert, ${result.created} neu.`,range:rangeStr});
-      // Refresh log
+      setFeedback({source:'tonnage',msg:`${days.length} Tage importiert — ${result.updated} aktualisiert, ${result.created} neu.`,range:fmtRange(dates[0],dates[dates.length-1])});
       const{data:newLogs}=await sb.from('import_log').select('*').eq('user_id',user.id).order('imported_at',{ascending:false}).limit(10);
       setLogs(newLogs||[]);
-    }catch(e){
-      console.error(e);toast('Fehler: '+e.message);
-    }
+    }catch(e){console.error(e);toast('Fehler: '+e.message)}
     setImporting(false);
   };
 
+  const copySQL=()=>{navigator.clipboard?.writeText(TONNAGE_SQL).then(()=>toast('SQL kopiert ✓')).catch(()=>toast('Kopieren fehlgeschlagen'))};
+
   const fmtRange=(s,e)=>{const f=d=>{const p=d.split('-');return p[2]+'.'+p[1]+'.'};return s===e?f(s):f(s)+' – '+f(e)};
+
+  const cutoff=getCutoff();
+  const cutoffFmt=cutoff.split('-').reverse().join('.');
 
   return html`<div style=${{paddingBottom:110}}>
     <div style=${{padding:'16px 18px 4px'}}>
       <h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Import</h1>
-      <div style=${{fontSize:13,color:C.muted,marginTop:4}}>1× pro Woche reicht.</div>
+      <div style=${{fontSize:13,color:C.muted,marginTop:4}}>1× pro Woche reicht. Cut-off: ab ${cutoffFmt}</div>
     </div>
 
     <div style=${{padding:'0 18px'}}>
-      <${SectionLabel}>Quellen<//>
-      <div style=${{display:'grid',gap:10}}>
-        ${sources.map(s=>{
-          const isActive=active===s.id;
-          return html`<${Card} key=${s.id} padding=${0}>
-            <div onClick=${()=>{setActive(isActive?null:s.id);setPasted('');setFeedback(null)}} style=${{display:'flex',alignItems:'center',gap:14,padding:14,cursor:'pointer'}}>
-              <div style=${{width:44,height:44,borderRadius:12,background:'#f4f4f2',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>${s.icon}</div>
-              <div style=${{flex:1,minWidth:0}}>
-                <div style=${{fontSize:15,fontWeight:600}}>${s.title}</div>
-                <div style=${{fontSize:11,color:C.muted,marginTop:2}}>${s.sub}</div>
-              </div>
-              <div style=${{width:28,height:28,borderRadius:14,background:isActive?C.text:'#f0f0ee',color:isActive?'#fff':C.muted,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14,fontWeight:700,transition:'transform 0.15s',transform:isActive?'rotate(45deg)':'rotate(0)'}}>+</div>
-            </div>
-            ${isActive?html`<div style=${{padding:'0 14px 14px',borderTop:'1px solid '+C.border}}>
-              <div style=${{fontSize:12,color:C.muted,padding:'12px 0 6px'}}>
-                ${s.id==='fddb'?'fddb Tagebuch → Datei → Exportieren → CSV kopieren und hier einfügen':
-                  s.id==='garmin-uds'?'Garmin Export ZIP → DI_CONNECT/DI-Connect-Aggregator/UDSFile_*.json öffnen und Inhalt einfügen':
-                  s.id==='garmin-act'?'Garmin Export ZIP → DI_CONNECT/DI-Connect-Fitness/*_summarizedActivities.json':
-                  s.id==='garmin-cycle'?'Garmin Export ZIP → DI_CONNECT/DI-Connect-Wellness/*_MenstrualCycles.json':
-                  'SQL-Export aus Workout Tracker Supabase: date, day, tonnage'}
-              </div>
-              <textarea value=${pasted} onInput=${e=>setPasted(e.target.value)} placeholder=${s.placeholder||'Daten einfügen…'}
-                style=${{width:'100%',minHeight:100,background:'#fafaf8',border:'1px solid '+C.border,borderRadius:12,padding:12,fontSize:11,fontFamily:'ui-monospace, SF Mono, Menlo, monospace',resize:'vertical',outline:'none',boxSizing:'border-box',color:C.text}}></textarea>
-              <div style=${{display:'flex',gap:8,marginTop:10}}>
-                <button onClick=${()=>doImport(s)} disabled=${!pasted.trim()||importing}
-                  style=${{padding:'12px 16px',background:C.text,color:'#fff',border:'none',borderRadius:12,fontSize:14,fontWeight:600,cursor:pasted.trim()&&!importing?'pointer':'not-allowed',flex:1,opacity:pasted.trim()&&!importing?1:.4}}>
-                  ${importing?'Importiere...':'Importieren'}
-                </button>
-              </div>
-              ${feedback&&feedback.source===s.id?html`<div style=${{marginTop:12,padding:12,background:'rgba(31,122,77,0.08)',border:'1px solid rgba(31,122,77,0.20)',borderRadius:10,fontSize:13,color:C.good,fontWeight:600}}>
-                ✓ ${feedback.msg}
-                <br/><span style=${{fontWeight:500,color:C.muted,fontSize:11}}>${feedback.range}</span>
-              </div>`:null}
-            </div>`:null}
-          <//>`;
-        })}
-      </div>
+
+      <!-- fddb -->
+      <${SectionLabel}>Ernährung<//>
+      <${Card} padding=${0}>
+        <div onClick=${()=>!importing&&fddbRef.current?.click()} style=${{display:'flex',alignItems:'center',gap:14,padding:14,cursor:'pointer'}}>
+          <div style=${{width:44,height:44,borderRadius:12,background:'#f4f4f2',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>🍎</div>
+          <div style=${{flex:1,minWidth:0}}>
+            <div style=${{fontSize:15,fontWeight:600}}>fddb CSV importieren</div>
+            <div style=${{fontSize:11,color:C.muted,marginTop:2}}>fddb Tagebuch → Datei → Exportieren</div>
+          </div>
+          <div style=${{fontSize:13,color:C.muted}}>📄</div>
+        </div>
+        <input ref=${fddbRef} type=file accept=".csv,.txt" onChange=${handleFddbFile} style=${{display:'none'}}/>
+        ${feedback?.source==='fddb'?html`<div style=${{padding:'0 14px 14px'}}><div style=${{padding:12,background:'rgba(31,122,77,0.08)',border:'1px solid rgba(31,122,77,0.20)',borderRadius:10,fontSize:13,color:C.good,fontWeight:600}}>✓ ${feedback.msg}<br/><span style=${{fontWeight:500,color:C.muted,fontSize:11}}>${feedback.range}</span></div></div>`:null}
+      <//>
+
+      <!-- Garmin -->
+      <${SectionLabel}>Aktivität & Zyklus<//>
+      <${Card} padding=${0}>
+        <div onClick=${()=>!importing&&fileRef.current?.click()} style=${{display:'flex',alignItems:'center',gap:14,padding:14,cursor:'pointer'}}>
+          <div style=${{width:44,height:44,borderRadius:12,background:'#f4f4f2',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>⌚</div>
+          <div style=${{flex:1,minWidth:0}}>
+            <div style=${{fontSize:15,fontWeight:600}}>Garmin ZIP importieren</div>
+            <div style=${{fontSize:11,color:C.muted,marginTop:2}}>Schritte, Aktivitäten, Zyklus — alles aus einer Datei</div>
+          </div>
+          <div style=${{fontSize:13,color:C.muted}}>📦</div>
+        </div>
+        <input ref=${fileRef} type=file accept=".zip" onChange=${handleGarminZip} style=${{display:'none'}}/>
+        ${garminStatus?html`<div style=${{padding:'0 14px 14px'}}><div style=${{padding:12,background:'#f4f4f2',borderRadius:10,fontSize:13,color:C.muted}}>${garminStatus}</div></div>`:null}
+        ${feedback?.source==='garmin'?html`<div style=${{padding:'0 14px 14px'}}><div style=${{padding:12,background:'rgba(31,122,77,0.08)',border:'1px solid rgba(31,122,77,0.20)',borderRadius:10,fontSize:13,color:C.good,fontWeight:600}}>✓ ${feedback.msg}<br/><span style=${{fontWeight:500,color:C.muted,fontSize:11}}>${feedback.range}</span></div></div>`:null}
+      <//>
+
+      <!-- Tonnage -->
+      <${SectionLabel}>Training Tonnage<//>
+      <${Card}>
+        <div style=${{fontSize:13,color:C.muted,marginBottom:10}}>
+          SQL im <span style=${{fontWeight:600}}>Workout Tracker</span> Supabase ausführen, Ergebnis als CSV kopieren:
+        </div>
+        <div style=${{position:'relative'}}>
+          <pre style=${{background:'#1a1a1a',color:'#e0e0de',padding:'14px 14px 14px 14px',borderRadius:12,fontSize:10,fontFamily:'ui-monospace, SF Mono, Menlo, monospace',overflow:'auto',maxHeight:160,whiteSpace:'pre-wrap',lineHeight:1.5,margin:0}}>${TONNAGE_SQL}</pre>
+          <button onClick=${copySQL} style=${{position:'absolute',top:8,right:8,padding:'4px 10px',background:'rgba(255,255,255,0.15)',color:'#fff',border:'none',borderRadius:8,fontSize:11,fontWeight:600,cursor:'pointer'}}>Kopieren</button>
+        </div>
+        <div style=${{marginTop:12}}>
+          <textarea value=${pasted} onInput=${e=>setPasted(e.target.value)} placeholder="date,day,plan_version,workout_name,tonnage\n2026-05-07,1,v6,Hinge + Pull,11240"
+            style=${{width:'100%',minHeight:80,background:'#fafaf8',border:'1px solid '+C.border,borderRadius:12,padding:12,fontSize:11,fontFamily:'ui-monospace, SF Mono, Menlo, monospace',resize:'vertical',outline:'none',boxSizing:'border-box',color:C.text}}></textarea>
+          <button onClick=${doTonnageImport} disabled=${!pasted.trim()||importing}
+            style=${{marginTop:8,width:'100%',padding:'12px 16px',background:C.text,color:'#fff',border:'none',borderRadius:12,fontSize:14,fontWeight:600,cursor:pasted.trim()&&!importing?'pointer':'not-allowed',opacity:pasted.trim()&&!importing?1:.4}}>
+            ${importing?'Importiere...':'Importieren'}
+          </button>
+        </div>
+        ${feedback?.source==='tonnage'?html`<div style=${{marginTop:12,padding:12,background:'rgba(31,122,77,0.08)',border:'1px solid rgba(31,122,77,0.20)',borderRadius:10,fontSize:13,color:C.good,fontWeight:600}}>✓ ${feedback.msg}<br/><span style=${{fontWeight:500,color:C.muted,fontSize:11}}>${feedback.range}</span></div>`:null}
+      <//>
 
       ${logs.length?html`
         <${SectionLabel}>Letzte Imports<//>
@@ -608,10 +681,33 @@ function ImportTab({user,toast}){
 function PlaceholderTab({id}){const labels={dashboard:'Dashboard',tabelle:'Tabelle'};const icons={dashboard:'📊',tabelle:'📋'};return html`<div style=${{paddingBottom:110,minHeight:'100dvh'}}><div style=${{padding:'60px 20px',textAlign:'center'}}><div style=${{fontSize:48,marginBottom:16}}>${icons[id]}</div><h2 style=${{fontSize:22,fontWeight:700,marginBottom:8}}>${labels[id]}</h2><div style=${{fontSize:14,color:C.muted}}>Kommt in Phase 3</div><div style=${{fontSize:13,color:C.muted,marginTop:8}}>${id==='dashboard'?'Charts, Trends und KPI-Cards':'Sheet-Layout mit allen Daten'}</div></div></div>`}
 
 /* Settings */
-function SettingsTab({user,onBack}){return html`<div style=${{paddingBottom:40,minHeight:'100dvh'}}><div style=${{padding:'20px 18px',display:'flex',alignItems:'center',gap:12}}><button onClick=${onBack} style=${{color:C.muted,padding:4}}><${IconChevL}/></button><h1 style=${{fontSize:22,fontWeight:700}}>Einstellungen</h1></div><div style=${{padding:'0 18px',display:'flex',flexDirection:'column',gap:12}}><${Card}><div style=${{fontSize:13,color:C.muted,marginBottom:4}}>Eingeloggt als</div><div style=${{fontSize:15,fontWeight:600}}>${user?.email||'—'}</div><//>
-  <${Card} onClick=${async()=>{try{const regs=await navigator.serviceWorker?.getRegistrations();for(const r of(regs||[]))await r.unregister();const keys=await caches.keys();for(const k of keys)await caches.delete(k)}catch(e){}location.reload(true)}} style=${{cursor:'pointer'}}><div style=${{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style=${{fontSize:14}}>App aktualisieren</span><span style=${{fontSize:11,color:C.muted}}>Cache leeren</span></div><//>
-  <${Card} onClick=${()=>sb.auth.signOut()} style=${{cursor:'pointer',textAlign:'center'}}><span style=${{fontSize:14,color:C.warnHigh,fontWeight:600}}>Abmelden</span><//>
-  </div></div>`}
+function SettingsTab({user,onBack}){
+  const[cutoff,setCutoff]=useState(()=>{try{return localStorage.getItem('ut_cutoff')||'2026-01-01'}catch(e){return'2026-01-01'}});
+  const saveCutoff=(v)=>{setCutoff(v);try{localStorage.setItem('ut_cutoff',v)}catch(e){}};
+  return html`<div style=${{paddingBottom:40,minHeight:'100dvh'}}>
+  <div style=${{padding:'20px 18px',display:'flex',alignItems:'center',gap:12}}>
+    <button onClick=${onBack} style=${{color:C.muted,padding:4}}><${IconChevL}/></button>
+    <h1 style=${{fontSize:22,fontWeight:700}}>Einstellungen</h1>
+  </div>
+  <div style=${{padding:'0 18px',display:'flex',flexDirection:'column',gap:12}}>
+    <${Card}>
+      <div style=${{fontSize:13,color:C.muted,marginBottom:4}}>Eingeloggt als</div>
+      <div style=${{fontSize:15,fontWeight:600}}>${user?.email||'—'}</div>
+    <//>
+    <${Card}>
+      <div style=${{fontSize:13,color:C.muted,marginBottom:8}}>Import Cut-off Datum</div>
+      <div style=${{fontSize:12,color:C.muted,marginBottom:8}}>Daten vor diesem Datum werden beim Import ignoriert.</div>
+      <input type=date value=${cutoff} onChange=${e=>saveCutoff(e.target.value)}
+        style=${{width:'100%',height:44,background:'#fafaf8',border:'1px solid '+C.border,borderRadius:12,padding:'0 12px',fontSize:15,color:C.text}}/>
+    <//>
+    <${Card} onClick=${async()=>{try{const regs=await navigator.serviceWorker?.getRegistrations();for(const r of(regs||[]))await r.unregister();const keys=await caches.keys();for(const k of keys)await caches.delete(k)}catch(e){}location.reload(true)}} style=${{cursor:'pointer'}}>
+      <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style=${{fontSize:14}}>App aktualisieren</span><span style=${{fontSize:11,color:C.muted}}>Cache leeren</span></div>
+    <//>
+    <${Card} onClick=${()=>sb.auth.signOut()} style=${{cursor:'pointer',textAlign:'center'}}>
+      <span style=${{fontSize:14,color:C.warnHigh,fontWeight:600}}>Abmelden</span>
+    <//>
+  </div>
+</div>`}
 
 render(html`<${App}/>`,document.getElementById('root'));
 </script>
