@@ -538,11 +538,18 @@ function ImportTab({user,toast}){
 
       setGarminStatus('Dateien werden gesucht...');
 
-      // Find UDS file
-      const udsFile=Object.keys(zip.files).find(f=>f.includes('UDSFile_')&&f.endsWith('.json'));
-      if(udsFile){
-        setGarminStatus('Schritte & kcal werden importiert...');
-        const udsText=await zip.files[udsFile].async('string');
+      // Find ALL UDS files (there are multiple, split by date range)
+      const udsFiles=Object.keys(zip.files).filter(f=>f.includes('UDSFile_')&&f.endsWith('.json'));
+      if(udsFiles.length){
+        setGarminStatus(`Schritte & kcal werden importiert (${udsFiles.length} Dateien)...`);
+        let allUDS=[];
+        for(const uf of udsFiles){
+          const text=await zip.files[uf].async('string');
+          try{const arr=JSON.parse(text);if(Array.isArray(arr))allUDS=allUDS.concat(arr)}catch(e){}
+        }
+        // Deduplicate by calendarDate (keep latest)
+        const byDate={};for(const d of allUDS){if(d.calendarDate)byDate[d.calendarDate]=d}
+        const udsText=JSON.stringify(Object.values(byDate));
         let days=parseGarminUDS(udsText);days=filterCutoff(days);
         if(days.length){const r=await importGarminUDS(user.id,days);results.push(`Schritte: ${days.length} Tage`);totalDays+=days.length;await logImport(user.id,'garmin',days,'UDS')}
       }
