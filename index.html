@@ -115,6 +115,7 @@ function App(){
   return html`<div style=${{minHeight:'100dvh',background:C.bg}}>
     ${ToastEl}
     ${scr==='heute'?html`<${HeuteTab} user=${user} toast=${toast}/>`:
+      scr==='import'?html`<${ImportTab} user=${user} toast=${toast}/>`:
       scr==='settings'?html`<${SettingsTab} user=${user} onBack=${()=>setScr('heute')}/>`:
       html`<${PlaceholderTab} id=${scr}/>`}
     <${BottomNav} active=${scr==='settings'?'heute':scr} onNav=${setScr}/>
@@ -260,8 +261,348 @@ function HeuteTab({user,toast}){
 
 function ActivityRow({icon,label,value,sub,last}){return html`<div style=${{display:'flex',alignItems:'center',gap:12,padding:'14px 16px',borderBottom:last?'none':'1px solid '+C.border}}><div style=${{fontSize:18,width:24,textAlign:'center'}}>${icon}</div><div style=${{flex:1}}><div style=${{fontSize:14,fontWeight:600}}>${label}</div><div style=${{fontSize:11,color:C.muted,marginTop:1}}>${sub}</div></div><div style=${{fontSize:18,fontWeight:700,fontVariantNumeric:'tabular-nums'}}>${value}</div></div>`}
 
+/* ═══════════════════════════════════════════
+   IMPORT TAB
+   ═══════════════════════════════════════════ */
+
+/* -- Parsers -- */
+
+function parseFddb(csv){
+  // Semikolon-getrennt, deutsche Dezimalkommas, kJ-basiert
+  // Cols: datetime; name; id; kJ; ?; fat_g; carbs_g; protein_g;
+  const lines=csv.trim().split('\n').filter(l=>l.trim());
+  const entries=[];
+  for(const line of lines){
+    const cols=line.split(';').map(c=>c.replace(/^"|"$/g,'').trim());
+    if(cols.length<8)continue;
+    const dtMatch=cols[0].match(/(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/);
+    if(!dtMatch)continue;
+    const[,dd,mm,yyyy,hh,mi]=dtMatch;
+    let date=`${yyyy}-${mm}-${dd}`;
+    // Mitternachts-Korrektur: 00:00-00:15 → Vortag
+    if(parseInt(hh)===0&&parseInt(mi)<=15){
+      date=addDays(date,-1);
+    }
+    const kj=parseFloat(cols[3].replace(',','.'))||0;
+    const fat=parseFloat(cols[5].replace(',','.'))||0;
+    const carbs=parseFloat(cols[6].replace(',','.'))||0;
+    const protein=parseFloat(cols[7].replace(',','.'))||0;
+    const kcal=Math.round(kj/4.184);
+    entries.push({date,kcal,protein,carbs,fat});
+  }
+  // Group by day
+  const byDay={};
+  for(const e of entries){
+    if(!byDay[e.date])byDay[e.date]={kcal:0,protein:0,carbs:0,fat:0};
+    byDay[e.date].kcal+=e.kcal;
+    byDay[e.date].protein+=e.protein;
+    byDay[e.date].carbs+=e.carbs;
+    byDay[e.date].fat+=e.fat;
+  }
+  // Filter incomplete days (<1600 kcal)
+  const days=Object.entries(byDay).filter(([,v])=>v.kcal>=1600).map(([date,v])=>({
+    date,kcal:Math.round(v.kcal),protein_g:Math.round(v.protein),carbs_g:Math.round(v.carbs),fat_g:Math.round(v.fat)
+  })).sort((a,b)=>a.date.localeCompare(b.date));
+  return days;
+}
+
+function parseTonnage(csv){
+  // Format: date,day,tonnage (from SQL export) or tab-separated
+  const lines=csv.trim().split('\n').filter(l=>l.trim());
+  const results=[];
+  for(const line of lines){
+    const sep=line.includes('\t')?'\t':',';
+    const cols=line.split(sep).map(c=>c.trim().replace(/^"|"$/g,''));
+    if(cols[0]==='date'||!cols[0].match(/^\d{4}-/))continue; // skip header
+    const date=cols[0].slice(0,10);
+    const tonnage=Math.round(parseFloat(cols[cols.length-1])||0);
+    if(tonnage>0)results.push({date,training_volume_kg:tonnage});
+  }
+  return results;
+}
+
+// Plan version from date (for Garmin activities)
+function planFromDate(date){
+  if(date<'2026-03-01')return'FH';if(date<'2026-04-01')return'v1';if(date<'2026-04-05')return'v2';
+  if(date<'2026-04-14')return'v3';if(date<'2026-04-24')return'v4';if(date<'2026-04-27')return'v5';return'v6';
+}
+// Workout name from day number + plan version
+function workoutName(day,plan){
+  if(plan==='FH')return'Foundations';
+  if(plan==='v1')return['Lower Body','Upper Body','Full Body'][day-1]||'Training';
+  const names=['Hinge + Pull','Squat + Push',plan==='v6'?'Heavy Compounds + Shoulders':'Heavy Compounds + Rehab'];
+  return names[day-1]||'Training';
+}
+
+function parseGarminUDS(jsonText){
+  const data=JSON.parse(jsonText);
+  const arr=Array.isArray(data)?data:[];
+  const today=localDate();
+  return arr.filter(d=>d.calendarDate&&d.calendarDate!==today).map(d=>({
+    date:d.calendarDate,steps:d.totalSteps||0,kcal_burned:Math.round(d.totalKilocalories||0)
+  })).filter(d=>d.steps>0||d.kcal_burned>0);
+}
+
+function parseGarminActivities(jsonText){
+  const data=JSON.parse(jsonText);
+  const activities=(data[0]?.summarizedActivitiesExport)||data;
+  const byDay={};
+  for(const a of activities){
+    if(!a.beginTimestamp)continue;
+    const d=new Date(a.beginTimestamp);
+    const date=localDate(d);
+    const type=a.activityType||'';
+    if(!byDay[date])byDay[date]=[];
+    byDay[date].push(type);
+  }
+  return Object.entries(byDay).map(([date,types])=>{
+    const parts=[];
+    const plan=planFromDate(date);
+    const strength=types.filter(t=>t==='strength_training').length;
+    if(strength>0)parts.push(plan+' Kraft');
+    if(types.includes('volleyball'))parts.push('CnS');
+    const others=types.filter(t=>t!=='strength_training'&&t!=='volleyball');
+    for(const t of others)parts.push(t.replace(/_/g,' '));
+    return{date,training:parts.join(' + ')||'Aktivität',plan_version:plan};
+  });
+}
+
+function parseGarminCycles(jsonText){
+  const data=JSON.parse(jsonText);
+  const cycles=(Array.isArray(data)?data:[]).filter(c=>c.startDate).sort((a,b)=>a.startDate.localeCompare(b.startDate));
+  const result=[];
+  for(let i=0;i<cycles.length;i++){
+    const start=cycles[i].startDate;
+    const len=cycles[i].actualCycleLength||28;
+    for(let d=0;d<len;d++){
+      const date=addDays(start,d);
+      // Don't go past next cycle start
+      if(i<cycles.length-1&&date>=cycles[i+1].startDate)break;
+      result.push({date,cycle_day:d+1});
+    }
+  }
+  return result;
+}
+
+/* -- DB import functions -- */
+
+async function importFddb(uid,days){
+  let updated=0,created=0;
+  for(const d of days){
+    const{data:ex}=await sb.from('daily_tracking').select('id,kcal').eq('user_id',uid).eq('date',d.date).maybeSingle();
+    if(ex){
+      await sb.from('daily_tracking').update({kcal:d.kcal,protein_g:d.protein_g,carbs_g:d.carbs_g,fat_g:d.fat_g,updated_at:new Date().toISOString()}).eq('id',ex.id);
+      updated++;
+    }else{
+      await sb.from('daily_tracking').insert({user_id:uid,date:d.date,kcal:d.kcal,protein_g:d.protein_g,carbs_g:d.carbs_g,fat_g:d.fat_g,updated_at:new Date().toISOString()});
+      created++;
+    }
+  }
+  return{updated,created};
+}
+
+async function importGarminUDS(uid,days){
+  let updated=0,created=0;
+  for(const d of days){
+    const{data:ex}=await sb.from('daily_tracking').select('id').eq('user_id',uid).eq('date',d.date).maybeSingle();
+    if(ex){
+      await sb.from('daily_tracking').update({steps:d.steps,kcal_burned:d.kcal_burned,updated_at:new Date().toISOString()}).eq('id',ex.id);
+      updated++;
+    }else{
+      await sb.from('daily_tracking').insert({user_id:uid,date:d.date,steps:d.steps,kcal_burned:d.kcal_burned,updated_at:new Date().toISOString()});
+      created++;
+    }
+  }
+  return{updated,created};
+}
+
+async function importGarminActivities(uid,days){
+  let updated=0,created=0;
+  for(const d of days){
+    const{data:ex}=await sb.from('daily_tracking').select('id').eq('user_id',uid).eq('date',d.date).maybeSingle();
+    if(ex){
+      await sb.from('daily_tracking').update({training:d.training,plan_version:d.plan_version,updated_at:new Date().toISOString()}).eq('id',ex.id);
+      updated++;
+    }else{
+      await sb.from('daily_tracking').insert({user_id:uid,date:d.date,training:d.training,plan_version:d.plan_version,updated_at:new Date().toISOString()});
+      created++;
+    }
+  }
+  return{updated,created};
+}
+
+async function importGarminCycles(uid,days){
+  let updated=0,created=0;
+  for(const d of days){
+    const{data:ex}=await sb.from('daily_tracking').select('id').eq('user_id',uid).eq('date',d.date).maybeSingle();
+    if(ex){
+      await sb.from('daily_tracking').update({cycle_day:d.cycle_day,updated_at:new Date().toISOString()}).eq('id',ex.id);
+      updated++;
+    }else{
+      await sb.from('daily_tracking').insert({user_id:uid,date:d.date,cycle_day:d.cycle_day,updated_at:new Date().toISOString()});
+      created++;
+    }
+  }
+  return{updated,created};
+}
+
+async function importTonnage(uid,days){
+  let updated=0,created=0;
+  for(const d of days){
+    const{data:ex}=await sb.from('daily_tracking').select('id').eq('user_id',uid).eq('date',d.date).maybeSingle();
+    if(ex){
+      await sb.from('daily_tracking').update({training_volume_kg:d.training_volume_kg,updated_at:new Date().toISOString()}).eq('id',ex.id);
+      updated++;
+    }else{
+      await sb.from('daily_tracking').insert({user_id:uid,date:d.date,training_volume_kg:d.training_volume_kg,updated_at:new Date().toISOString()});
+      created++;
+    }
+  }
+  return{updated,created};
+}
+
+async function logImport(uid,source,days,filename){
+  if(!days.length)return;
+  const dates=days.map(d=>d.date).sort();
+  await sb.from('import_log').insert({user_id:uid,source,date_range_start:dates[0],date_range_end:dates[dates.length-1],records_count:days.length,raw_filename:filename||source});
+}
+
+/* -- Import Tab Component -- */
+
+function ImportTab({user,toast}){
+  const[active,setActive]=useState(null);
+  const[pasted,setPasted]=useState('');
+  const[feedback,setFeedback]=useState(null);
+  const[importing,setImporting]=useState(false);
+  const[logs,setLogs]=useState([]);
+
+  // Load import log
+  useEffect(()=>{
+    sb.from('import_log').select('*').eq('user_id',user.id).order('imported_at',{ascending:false}).limit(10).then(({data})=>setLogs(data||[]));
+  },[user.id]);
+
+  const sources=[
+    {id:'fddb',title:'fddb',sub:'Tagebuch CSV — Ernährung',icon:'🍎',kind:'paste',
+      placeholder:'"06.05.2026 17:05";"100 g Pudding";"833691";"615";"0";"2,3";"24";"4,9"'},
+    {id:'garmin-uds',title:'Garmin Schritte',sub:'UDS JSON — Schritte + kcal burned',icon:'👣',kind:'paste',
+      placeholder:'[{"calendarDate":"2026-05-08","totalKilocalories":1789,"totalSteps":4554}]'},
+    {id:'garmin-act',title:'Garmin Aktivitäten',sub:'Activities JSON — Training',icon:'🏃',kind:'paste',
+      placeholder:'{"data":[{"summarizedActivitiesExport":[...]}]}'},
+    {id:'garmin-cycle',title:'Garmin Zyklus',sub:'MenstrualCycles JSON — Zyklustag',icon:'📅',kind:'paste',
+      placeholder:'[{"startDate":"2026-04-09","actualCycleLength":28}]'},
+    {id:'tonnage',title:'Workout Tonnage',sub:'SQL-CSV-Export aus Workout Tracker',icon:'🏋️',kind:'paste',
+      placeholder:'date,day,tonnage\n2026-05-07,1,11240'},
+  ];
+
+  const doImport=async(s)=>{
+    if(!pasted.trim()){toast('Keine Daten eingefügt');return}
+    setImporting(true);setFeedback(null);
+    try{
+      let days,result;
+      if(s.id==='fddb'){
+        days=parseFddb(pasted);
+        if(!days.length){toast('Keine gültigen Tage gefunden (min. 1600 kcal)');setImporting(false);return}
+        result=await importFddb(user.id,days);
+        await logImport(user.id,'fddb',days,'fddb_tagebuch.csv');
+      }else if(s.id==='garmin-uds'){
+        days=parseGarminUDS(pasted);
+        if(!days.length){toast('Keine Tage gefunden');setImporting(false);return}
+        result=await importGarminUDS(user.id,days);
+        await logImport(user.id,'garmin',days,'UDS JSON');
+      }else if(s.id==='garmin-act'){
+        days=parseGarminActivities(pasted);
+        if(!days.length){toast('Keine Aktivitäten gefunden');setImporting(false);return}
+        result=await importGarminActivities(user.id,days);
+        await logImport(user.id,'garmin',days,'Activities JSON');
+      }else if(s.id==='garmin-cycle'){
+        days=parseGarminCycles(pasted);
+        if(!days.length){toast('Keine Zyklusdaten gefunden');setImporting(false);return}
+        result=await importGarminCycles(user.id,days);
+        await logImport(user.id,'garmin',days,'MenstrualCycles JSON');
+      }else if(s.id==='tonnage'){
+        days=parseTonnage(pasted);
+        if(!days.length){toast('Keine Tonnage-Daten gefunden');setImporting(false);return}
+        result=await importTonnage(user.id,days);
+        await logImport(user.id,'tonnage',days,'workouts.csv');
+      }
+      const dates=days.map(d=>d.date).sort();
+      const rangeStr=fmtRange(dates[0],dates[dates.length-1]);
+      setFeedback({source:s.id,msg:`${days.length} Tage importiert — ${result.updated} aktualisiert, ${result.created} neu.`,range:rangeStr});
+      // Refresh log
+      const{data:newLogs}=await sb.from('import_log').select('*').eq('user_id',user.id).order('imported_at',{ascending:false}).limit(10);
+      setLogs(newLogs||[]);
+    }catch(e){
+      console.error(e);toast('Fehler: '+e.message);
+    }
+    setImporting(false);
+  };
+
+  const fmtRange=(s,e)=>{const f=d=>{const p=d.split('-');return p[2]+'.'+p[1]+'.'};return s===e?f(s):f(s)+' – '+f(e)};
+
+  return html`<div style=${{paddingBottom:110}}>
+    <div style=${{padding:'16px 18px 4px'}}>
+      <h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Import</h1>
+      <div style=${{fontSize:13,color:C.muted,marginTop:4}}>1× pro Woche reicht.</div>
+    </div>
+
+    <div style=${{padding:'0 18px'}}>
+      <${SectionLabel}>Quellen<//>
+      <div style=${{display:'grid',gap:10}}>
+        ${sources.map(s=>{
+          const isActive=active===s.id;
+          return html`<${Card} key=${s.id} padding=${0}>
+            <div onClick=${()=>{setActive(isActive?null:s.id);setPasted('');setFeedback(null)}} style=${{display:'flex',alignItems:'center',gap:14,padding:14,cursor:'pointer'}}>
+              <div style=${{width:44,height:44,borderRadius:12,background:'#f4f4f2',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>${s.icon}</div>
+              <div style=${{flex:1,minWidth:0}}>
+                <div style=${{fontSize:15,fontWeight:600}}>${s.title}</div>
+                <div style=${{fontSize:11,color:C.muted,marginTop:2}}>${s.sub}</div>
+              </div>
+              <div style=${{width:28,height:28,borderRadius:14,background:isActive?C.text:'#f0f0ee',color:isActive?'#fff':C.muted,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14,fontWeight:700,transition:'transform 0.15s',transform:isActive?'rotate(45deg)':'rotate(0)'}}>+</div>
+            </div>
+            ${isActive?html`<div style=${{padding:'0 14px 14px',borderTop:'1px solid '+C.border}}>
+              <div style=${{fontSize:12,color:C.muted,padding:'12px 0 6px'}}>
+                ${s.id==='fddb'?'fddb Tagebuch → Datei → Exportieren → CSV kopieren und hier einfügen':
+                  s.id==='garmin-uds'?'Garmin Export ZIP → DI_CONNECT/DI-Connect-Aggregator/UDSFile_*.json öffnen und Inhalt einfügen':
+                  s.id==='garmin-act'?'Garmin Export ZIP → DI_CONNECT/DI-Connect-Fitness/*_summarizedActivities.json':
+                  s.id==='garmin-cycle'?'Garmin Export ZIP → DI_CONNECT/DI-Connect-Wellness/*_MenstrualCycles.json':
+                  'SQL-Export aus Workout Tracker Supabase: date, day, tonnage'}
+              </div>
+              <textarea value=${pasted} onInput=${e=>setPasted(e.target.value)} placeholder=${s.placeholder||'Daten einfügen…'}
+                style=${{width:'100%',minHeight:100,background:'#fafaf8',border:'1px solid '+C.border,borderRadius:12,padding:12,fontSize:11,fontFamily:'ui-monospace, SF Mono, Menlo, monospace',resize:'vertical',outline:'none',boxSizing:'border-box',color:C.text}}></textarea>
+              <div style=${{display:'flex',gap:8,marginTop:10}}>
+                <button onClick=${()=>doImport(s)} disabled=${!pasted.trim()||importing}
+                  style=${{padding:'12px 16px',background:C.text,color:'#fff',border:'none',borderRadius:12,fontSize:14,fontWeight:600,cursor:pasted.trim()&&!importing?'pointer':'not-allowed',flex:1,opacity:pasted.trim()&&!importing?1:.4}}>
+                  ${importing?'Importiere...':'Importieren'}
+                </button>
+              </div>
+              ${feedback&&feedback.source===s.id?html`<div style=${{marginTop:12,padding:12,background:'rgba(31,122,77,0.08)',border:'1px solid rgba(31,122,77,0.20)',borderRadius:10,fontSize:13,color:C.good,fontWeight:600}}>
+                ✓ ${feedback.msg}
+                <br/><span style=${{fontWeight:500,color:C.muted,fontSize:11}}>${feedback.range}</span>
+              </div>`:null}
+            </div>`:null}
+          <//>`;
+        })}
+      </div>
+
+      ${logs.length?html`
+        <${SectionLabel}>Letzte Imports<//>
+        <${Card} padding=${0}>
+          ${logs.map((l,i)=>html`<div key=${l.id} style=${{display:'flex',alignItems:'center',gap:12,padding:'11px 14px',borderBottom:i===logs.length-1?'none':'1px solid '+C.border}}>
+            <div style=${{fontSize:10,fontWeight:700,color:C.muted,textTransform:'uppercase',letterSpacing:0.4,width:60,flexShrink:0}}>${l.source}</div>
+            <div style=${{flex:1,minWidth:0}}>
+              <div style=${{fontSize:12,fontWeight:600}}>${l.records_count} ${l.records_count===1?'Eintrag':'Einträge'} · ${fmtRange(l.date_range_start,l.date_range_end)}</div>
+              <div style=${{fontSize:10,color:C.muted,marginTop:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>${l.raw_filename||''}</div>
+            </div>
+            <div style=${{fontSize:11,color:C.muted,fontVariantNumeric:'tabular-nums'}}>${new Date(l.imported_at).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>
+          </div>`)}
+        <//>
+      `:null}
+    </div>
+  </div>`;
+}
+
 /* Placeholder */
-function PlaceholderTab({id}){const labels={dashboard:'Dashboard',tabelle:'Tabelle',import:'Import'};const icons={dashboard:'📊',tabelle:'📋',import:'📥'};const ph={dashboard:'3',tabelle:'3',import:'2'};return html`<div style=${{paddingBottom:110,minHeight:'100dvh'}}><div style=${{padding:'60px 20px',textAlign:'center'}}><div style=${{fontSize:48,marginBottom:16}}>${icons[id]}</div><h2 style=${{fontSize:22,fontWeight:700,marginBottom:8}}>${labels[id]}</h2><div style=${{fontSize:14,color:C.muted}}>Kommt in Phase ${ph[id]}</div><div style=${{fontSize:13,color:C.muted,marginTop:8}}>${id==='dashboard'?'Charts, Trends und KPI-Cards':id==='tabelle'?'Sheet-Layout mit allen Daten':'fddb, Garmin und Tonnage Imports'}</div></div></div>`}
+function PlaceholderTab({id}){const labels={dashboard:'Dashboard',tabelle:'Tabelle'};const icons={dashboard:'📊',tabelle:'📋'};return html`<div style=${{paddingBottom:110,minHeight:'100dvh'}}><div style=${{padding:'60px 20px',textAlign:'center'}}><div style=${{fontSize:48,marginBottom:16}}>${icons[id]}</div><h2 style=${{fontSize:22,fontWeight:700,marginBottom:8}}>${labels[id]}</h2><div style=${{fontSize:14,color:C.muted}}>Kommt in Phase 3</div><div style=${{fontSize:13,color:C.muted,marginTop:8}}>${id==='dashboard'?'Charts, Trends und KPI-Cards':'Sheet-Layout mit allen Daten'}</div></div></div>`}
 
 /* Settings */
 function SettingsTab({user,onBack}){return html`<div style=${{paddingBottom:40,minHeight:'100dvh'}}><div style=${{padding:'20px 18px',display:'flex',alignItems:'center',gap:12}}><button onClick=${onBack} style=${{color:C.muted,padding:4}}><${IconChevL}/></button><h1 style=${{fontSize:22,fontWeight:700}}>Einstellungen</h1></div><div style=${{padding:'0 18px',display:'flex',flexDirection:'column',gap:12}}><${Card}><div style=${{fontSize:13,color:C.muted,marginBottom:4}}>Eingeloggt als</div><div style=${{fontSize:15,fontWeight:600}}>${user?.email||'—'}</div><//>
