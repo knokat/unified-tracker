@@ -165,6 +165,7 @@ function HeuteTab({user,toast,onSettings}){
   const onNotesInput=(e)=>{const v=e.target.value;setNotes(v);clearTimeout(notesTimer.current);notesTimer.current=setTimeout(()=>dbUpsertNotes(user.id,selDate,v),1500)};
   const onDayTypeChange=(dt)=>{setDayType(dt);dbUpsertDayType(user.id,selDate,dt)};
   const goDate=(n)=>setSelDate(d=>addDays(d,n));
+  const goWeek=(n)=>setSelDate(d=>addDays(d,n*7));
   const dt=fmtDateFull(selDate);
 
   const dWeight=saved&&prevData?.weight_kg!=null&&dayData?.weight_kg!=null?round1(dayData.weight_kg-prevData.weight_kg):null;
@@ -190,9 +191,9 @@ function HeuteTab({user,toast,onSettings}){
       <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <h1 style=${{fontSize:30,fontWeight:700,margin:'2px 0 0',letterSpacing:'-0.6px'}}>${dt.full}</h1>
         <div style=${{display:'flex',gap:4}}>
-          <button onClick=${()=>goDate(-1)} style=${{width:36,height:36,display:'flex',alignItems:'center',justifyContent:'center',borderRadius:18,color:C.muted}}><${IconChevL}/></button>
+          <button onClick=${()=>goWeek(-1)} style=${{width:36,height:36,display:'flex',alignItems:'center',justifyContent:'center',borderRadius:18,color:C.muted}}><${IconChevL}/></button>
           ${!isToday(selDate)?html`<button onClick=${()=>setSelDate(localDate())} style=${{height:36,padding:'0 12px',borderRadius:18,fontSize:12,fontWeight:600,color:C.text,background:'#ececea'}}>Heute</button>`:null}
-          <button onClick=${()=>goDate(1)} disabled=${isToday(selDate)} style=${{width:36,height:36,display:'flex',alignItems:'center',justifyContent:'center',borderRadius:18,color:C.muted,opacity:isToday(selDate)?.3:1}}><${IconChevR}/></button>
+          <button onClick=${()=>goWeek(1)} disabled=${isToday(selDate)} style=${{width:36,height:36,display:'flex',alignItems:'center',justifyContent:'center',borderRadius:18,color:C.muted,opacity:isToday(selDate)?.3:1}}><${IconChevR}/></button>
         </div>
       </div>
     </div>
@@ -1027,11 +1028,12 @@ function renderTonnageChart(ctx,data,milestones){
     if(t.includes('hinge')||t.includes('pull'))return'#A42059';
     if(t.includes('squat')||t.includes('push'))return'#623c6d';
     if(t.includes('heavy')||t.includes('compound')||t.includes('full'))return'#205781';
-    // Fallback: use day-of-week (Mo/Sa=Hinge+Pull, Do=Squat+Push, else=Compounds)
+    // Fallback: use day-of-week (Mo=Hinge+Pull, Do=Squat+Push, Sa=Compounds)
     const dow=parseDateLocal(d.date).getDay();
-    if(dow===1||dow===6)return'#A42059'; // Mo, Sa
-    if(dow===4)return'#623c6d'; // Do
-    return'#205781';
+    if(dow===1)return'#A42059'; // Mo → Hinge+Pull
+    if(dow===4)return'#623c6d'; // Do → Squat+Push
+    if(dow===6)return'#205781'; // Sa → Compounds
+    return'#A42059'; // other days fallback
   });
   return new Chart(ctx,{
     type:'bar',
@@ -1054,14 +1056,27 @@ const DOW_LABELS=['Mo','Di','Mi','Do','Fr','Sa','So'];
 
 // Workout type colors
 const WT_COLORS={hp:'#A42059',sp:'#623c6d',co:'#205781'};
-function workoutType(training){
+function workoutTypeFromTraining(training){
   const t=(training||'').toLowerCase();
   if(t.includes('hinge')||t.includes('pull'))return'hp';
   if(t.includes('squat')||t.includes('push'))return'sp';
   if(t.includes('heavy')||t.includes('compound')||t.includes('full'))return'co';
-  return'hp'; // fallback
+  return null; // unknown from string
 }
-function kraftColor(training){return WT_COLORS[workoutType(training)]||C.muskelmasse}
+function workoutTypeFromDow(dow){
+  // Mo=1 → Hinge+Pull, Do=4 → Squat+Push, Sa=6 → Compounds
+  if(dow===1)return'hp';
+  if(dow===4)return'sp';
+  if(dow===6)return'co';
+  return'hp';
+}
+function kraftColorForCell(training,date){
+  const wt=workoutTypeFromTraining(training);
+  if(wt)return WT_COLORS[wt];
+  // Fallback to day-of-week
+  const dow=date.getDay();
+  return WT_COLORS[workoutTypeFromDow(dow)];
+}
 
 function TrainingCalendar({user}){
   const[monthOffset,setMonthOffset]=useState(0);
@@ -1153,12 +1168,12 @@ function TrainingCalendar({user}){
           const t=(cell.row?.training||'');
           const isKraft=/v\d|FH|Kraft|Hinge|Squat|Heavy|Compound|Full/i.test(t);
           const isCnS=/CnS/i.test(t);
-          const kColor=isKraft?kraftColor(t):C.muskelmasse;
+          const kColor=isKraft?kraftColorForCell(t,cell.date):kraftColorForCell('',cell.date);
           const dim=!cell.inMonth;
           return html`<div key=${di} style=${{aspectRatio:'1',position:'relative',borderRadius:8,background:dim?'transparent':'#fafaf8',border:cell.isToday?'1.5px solid '+C.text:'1px solid '+(dim?'transparent':C.border),opacity:dim?.35:1,display:'flex',flexDirection:'column',padding:4,overflow:'hidden'}}>
             <div style=${{fontSize:10,fontWeight:600,color:C.muted,fontVariantNumeric:'tabular-nums',lineHeight:1,textAlign:'right'}}>${cell.date.getDate()}</div>
             <div style=${{flex:1,display:'flex',alignItems:'flex-end',justifyContent:'center',gap:2,paddingBottom:2}}>
-              ${planK?html`<${CalPill} color=${isKraft?kColor:C.muskelmasse} done=${isKraft} future=${cell.isFuture} label="K"/>`:null}
+              ${planK?html`<${CalPill} color=${kColor} done=${isKraft} future=${cell.isFuture} label="K"/>`:null}
               ${planCns?html`<${CalPill} color=${C.rest} done=${isCnS} future=${cell.isFuture} label="C"/>`:null}
               ${!planK&&isKraft?html`<${CalPill} color=${kColor} done=${true} extra=${true} label="K"/>`:null}
               ${!planCns&&isCnS?html`<${CalPill} color=${C.rest} done=${true} extra=${true} label="C"/>`:null}
