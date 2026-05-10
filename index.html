@@ -114,7 +114,7 @@ function App(){
 
   return html`<div style=${{minHeight:'100dvh',background:C.bg}}>
     ${ToastEl}
-    ${scr==='heute'?html`<${HeuteTab} user=${user} toast=${toast}/>`:
+    ${scr==='heute'?html`<${HeuteTab} user=${user} toast=${toast} onSettings=${()=>setScr('settings')}/>`:
       scr==='import'?html`<${ImportTab} user=${user} toast=${toast}/>`:
       scr==='settings'?html`<${SettingsTab} user=${user} onBack=${()=>setScr('heute')}/>`:
       html`<${PlaceholderTab} id=${scr}/>`}
@@ -125,7 +125,7 @@ function App(){
 /* ═══════════════════════════════════════════
    HEUTE TAB
    ═══════════════════════════════════════════ */
-function HeuteTab({user,toast}){
+function HeuteTab({user,toast,onSettings}){
   const[selDate,setSelDate]=useState(localDate());
   const[dayData,setDayData]=useState(null);const[prevData,setPrevData]=useState(null);
   const[weekData,setWeekData]=useState([]);
@@ -180,7 +180,10 @@ function HeuteTab({user,toast}){
     <div style=${{padding:'16px 18px 4px'}}>
       <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
         <div style=${{fontSize:13,color:C.muted,fontWeight:500}}>${dt.wd}</div>
-        <${DayTypePill} type=${dayType}/>
+        <div style=${{display:'flex',alignItems:'center',gap:8}}>
+          <${DayTypePill} type=${dayType}/>
+          <button onClick=${onSettings} style=${{color:C.muted,padding:4,display:'flex',alignItems:'center'}}><svg width=18 height=18 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx=12 cy=12 r=3/></svg></button>
+        </div>
       </div>
       <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <h1 style=${{fontSize:30,fontWeight:700,margin:'2px 0 0',letterSpacing:'-0.6px'}}>${dt.full}</h1>
