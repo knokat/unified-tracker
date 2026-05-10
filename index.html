@@ -37,6 +37,7 @@ const C={
   kcal:'#205781',protein:'#006D77',carbs:'#4F959D',fat:'#7AB2B2',
   workout:'#A42059',rest:'#7AB2B2',friday:'#205781',
   fettmasse:'#D4A017',muskelmasse:'#C0392B',gewicht:'#95a5a6',
+  gegessen:'#F4D03F',verbrannt:'#E67E22',
   warnMid:'#623c6d',warnHigh:'#A42059',good:'#1f7a4d',
 };
 
@@ -700,7 +701,8 @@ async function loadChartJs(){
   chartJsLoaded=true;
 }
 
-const RANGES=[{key:'4w',label:'4 Wochen',days:28},{key:'8w',label:'8 Wochen',days:56},{key:'3m',label:'3 Monate',days:91},{key:'all',label:'Alles',days:9999}];
+const RANGES=[{key:'1w',label:'1 Wo',days:7},{key:'4w',label:'4 Wo',days:28},{key:'8w',label:'8 Wo',days:56},{key:'3m',label:'3 Mo',days:91},{key:'all',label:'Alles',days:9999}];
+const PERIOD_SHORT={'1w':'1 Wo.','4w':'4 Wo.','8w':'8 Wo.','3m':'3 Mo.','all':'gesamt'};
 
 function DashboardTab({user}){
   const[range,setRange]=useState('8w');
@@ -708,7 +710,6 @@ function DashboardTab({user}){
   const[milestones,setMilestones]=useState([]);
   const[loading,setLoading]=useState(true);
 
-  // Load data
   useEffect(()=>{
     setLoading(true);
     const r=RANGES.find(r=>r.key===range);
@@ -724,32 +725,28 @@ function DashboardTab({user}){
     });
   },[user.id,range]);
 
-  // KPI calculations
+  // KPIs — split data in half, compare averages (matches prototype)
   const kpis=useMemo(()=>{
     if(!data||!data.length)return null;
-    const today=localDate();
-    const d7=addDays(today,-7);
-    const d14=addDays(today,-14);
-    const last7=data.filter(d=>d.date>d7&&d.date<=today);
-    const prev7=data.filter(d=>d.date>d14&&d.date<=d7);
+    const half=Math.floor(data.length/2);
+    const firstHalf=data.slice(0,half);
+    const lastHalf=data.slice(half);
     const avg=(arr,key)=>{const vals=arr.filter(d=>d[key]!=null).map(d=>d[key]);return vals.length?vals.reduce((a,b)=>a+b,0)/vals.length:null};
-    const avgFatNow=avg(last7,'fat_mass_kg');
-    const avgFatPrev=avg(prev7,'fat_mass_kg');
-    const avgMusNow=avg(last7,'muscle_mass_kg');
-    const avgMusPrev=avg(prev7,'muscle_mass_kg');
-    const avgProtein=avg(last7,'protein_g');
-    const d28=addDays(today,-28);
-    const kraftCount=data.filter(d=>d.date>d28&&d.training&&d.training.toLowerCase().includes('kraft')).length;
-    return{
-      dFat:avgFatNow!=null&&avgFatPrev!=null?round1(avgFatNow-avgFatPrev):null,
-      dMus:avgMusNow!=null&&avgMusPrev!=null?round1(avgMusNow-avgMusPrev):null,
-      avgProtein:avgProtein!=null?Math.round(avgProtein):null,
-      kraftCount
-    };
+    const avgFatFirst=avg(firstHalf,'fat_mass_kg');
+    const avgFatLast=avg(lastHalf,'fat_mass_kg');
+    const avgMusFirst=avg(firstHalf,'muscle_mass_kg');
+    const avgMusLast=avg(lastHalf,'muscle_mass_kg');
+    const avgProtein=avg(data,'protein_g');
+    const kraftCount=data.filter(d=>d.training&&/v\d|FH/.test(d.training)).length;
+    const dFat=avgFatFirst!=null&&avgFatLast!=null?avgFatLast-avgFatFirst:null;
+    const dMus=avgMusFirst!=null&&avgMusLast!=null?avgMusLast-avgMusFirst:null;
+    return{dFat,dMus,avgProtein:avgProtein!=null?Math.round(avgProtein):null,kraftCount};
   },[data]);
 
+  const ps=PERIOD_SHORT[range]||'';
+
   if(loading)return html`<div style=${{paddingBottom:110,minHeight:'100dvh'}}>
-    <div style=${{padding:'16px 18px 4px'}}><h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Dashboard</h1></div>
+    <div style=${{padding:'16px 18px 4px',display:'flex',alignItems:'baseline',justifyContent:'space-between'}}><h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Trends</h1><span style=${{fontSize:12,color:C.muted}}>für Friederike</span></div>
     <div style=${{padding:'20px 18px',display:'flex',flexDirection:'column',gap:12}}>
       <div class=skel style=${{height:80}}></div>
       <div class=skel style=${{height:220}}></div>
@@ -758,68 +755,82 @@ function DashboardTab({user}){
   </div>`;
 
   return html`<div style=${{paddingBottom:110}}>
-    <div style=${{padding:'16px 18px 4px'}}>
-      <h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Dashboard</h1>
-      <div style=${{fontSize:13,color:C.muted,marginTop:4}}>${data?.length||0} Datenpunkte</div>
+    <div style=${{padding:'8px 18px 4px',display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
+      <h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Trends</h1>
+      <span style=${{fontSize:12,color:C.muted}}>für Friederike</span>
     </div>
-
-    <div style=${{padding:'12px 18px 0'}}>
-      <div style=${{display:'flex',background:'#ececea',borderRadius:11,padding:3,gap:2}}>
-        ${RANGES.map(r=>html`<div key=${r.key} onClick=${()=>setRange(r.key)} style=${{flex:1,padding:'8px 4px',fontSize:12,fontWeight:range===r.key?600:500,textAlign:'center',borderRadius:8,cursor:'pointer',background:range===r.key?'#fff':'transparent',color:range===r.key?C.text:C.muted,boxShadow:range===r.key?'0 1px 2px rgba(0,0,0,0.06)':'none',transition:'all 0.15s',userSelect:'none'}}>${r.label}</div>`)}
-      </div>
-    </div>
-
-    ${kpis?html`
-      <div style=${{padding:'14px 18px 0'}}>
-        <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
-          <${KPICard} label="Δ Fettmasse" value=${kpis.dFat} unit="kg" color=${C.fettmasse} goodIfNegative=${true}/>
-          <${KPICard} label="Δ Muskelmasse" value=${kpis.dMus} unit="kg" color=${C.muskelmasse} goodIfNegative=${false}/>
-          <${KPICard} label="⌀ Protein" value=${kpis.avgProtein} unit="g" color=${C.protein} plain=${true}/>
-          <${KPICard} label="Kraft (28d)" value=${kpis.kraftCount} unit="×" color=${C.workout} plain=${true}/>
-        </div>
-      </div>
-    `:null}
 
     <div style=${{padding:'0 18px'}}>
-      <${SectionLabel}>Körperkomposition<//>
-      <${ChartCanvas} id="bodycomp" data=${data} milestones=${milestones} renderer=${renderBodyCompChart}/>
+      <div style=${{marginTop:14}}>
+        <div style=${{display:'flex',background:'#ececea',borderRadius:11,padding:3,gap:2}}>
+          ${RANGES.map(r=>html`<div key=${r.key} onClick=${()=>setRange(r.key)} style=${{flex:1,padding:'8px 4px',fontSize:12,fontWeight:range===r.key?600:500,textAlign:'center',borderRadius:8,cursor:'pointer',background:range===r.key?'#fff':'transparent',color:range===r.key?C.text:C.muted,boxShadow:range===r.key?'0 1px 2px rgba(0,0,0,0.06)':'none',transition:'all 0.15s',userSelect:'none'}}>${r.label}</div>`)}
+        </div>
+      </div>
 
-      <${SectionLabel}>Kalorien<//>
-      <${ChartCanvas} id="calories" data=${data} milestones=${milestones} renderer=${renderCaloriesChart}/>
+      ${kpis?html`
+        <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:14}}>
+          <${KPICard} label="Δ Fettmasse" value=${kpis.dFat} unit="kg" sub=${'über '+ps} color=${kpis.dFat!=null&&kpis.dFat<0?C.good:C.warnHigh} goodIfNegative=${true}/>
+          <${KPICard} label="Δ Muskelmasse" value=${kpis.dMus} unit="kg" sub=${'über '+ps} color=${kpis.dMus!=null&&kpis.dMus>0?C.good:C.warnHigh} goodIfNegative=${false}/>
+          <${KPICard} label="⌀ Protein" value=${kpis.avgProtein} unit="g" sub=${'ø '+ps} plain=${true}/>
+          <${KPICard} label="Kraft" value=${kpis.kraftCount} unit="×" sub=${'in '+ps} plain=${true}/>
+        </div>
+      `:null}
 
-      <${SectionLabel}>Schritte<//>
-      <${ChartCanvas} id="steps" data=${data} milestones=${milestones} renderer=${renderStepsChart}/>
+      <${SectionLabel} right=${html`<span style=${{display:'inline-flex',gap:10}}><${LegendDot} c=${C.fettmasse} label="Fett"/><${LegendDot} c=${C.muskelmasse} label="Muskel"/></span>`}>Körperkomposition<//>
+      <${ChartCanvas} id="bodycomp" data=${data} milestones=${milestones} renderer=${renderBodyCompChart} height=${180}/>
 
-      <${SectionLabel}>Training & Volumen<//>
-      <${ChartCanvas} id="tonnage" data=${data} milestones=${milestones} renderer=${renderTonnageChart}/>
+      <${SectionLabel} right=${html`<span style=${{display:'inline-flex',gap:10}}><${LegendDot} c=${'#C9A100'} label="Gegessen"/><${LegendDot} c=${C.verbrannt||'#E67E22'} label="Verbrannt"/></span>`}>Kalorien<//>
+      <${ChartCanvas} id="calories" data=${data} milestones=${milestones} renderer=${renderCaloriesChart} height=${150}/>
+
+      <${SectionLabel} right="Ziel 7.500">Schritte<//>
+      <${ChartCanvas} id="steps" data=${data} milestones=${milestones} renderer=${renderStepsChart} height=${120}/>
+
+      <${SectionLabel} right=${html`<span style=${{display:'inline-flex',gap:10}}><${LegendDot} c=${'#A42059'} label="Hinge+Pull"/><${LegendDot} c=${'#623c6d'} label="Squat+Push"/><${LegendDot} c=${'#205781'} label="Compounds"/></span>`}>Trainings-Volumen<//>
+      <${ChartCanvas} id="tonnage" data=${data} milestones=${milestones} renderer=${renderTonnageChart} height=${130}/>
+
+      ${milestones.length?html`
+        <${SectionLabel}>Milestones im Zeitraum<//>
+        <${Card} padding=${0}>
+          ${milestones.slice().reverse().slice(0,6).map((m,i,arr)=>html`<div key=${m.date+m.title} style=${{display:'flex',alignItems:'flex-start',gap:12,padding:'12px 14px',borderBottom:i===arr.length-1?'none':'1px solid '+C.border}}>
+            <div style=${{fontSize:11,fontWeight:700,color:C.muted,width:56,fontVariantNumeric:'tabular-nums',flexShrink:0,paddingTop:2}}>${m.date.split('-').slice(1).reverse().join('.')+'.'}</div>
+            <div style=${{flex:1,minWidth:0}}>
+              <div style=${{fontSize:13,fontWeight:600}}>${m.title}</div>
+              <div style=${{fontSize:11,color:C.muted,marginTop:1,textTransform:'capitalize'}}>${m.category.replace('_',' ')}</div>
+            </div>
+          </div>`)}
+        <//>
+      `:null}
     </div>
   </div>`;
 }
 
-function KPICard({label,value,unit,color,goodIfNegative,plain}){
+function KPICard({label,value,unit,sub,color,goodIfNegative,plain}){
   const isNull=value==null;
-  let displayVal=isNull?'—':value;
-  let deltaColor=C.muted;
-  if(!isNull&&!plain){
-    const isGood=goodIfNegative?value<0:value>0;
-    const isNeutral=Math.abs(value)<0.05;
-    deltaColor=isNeutral?C.muted:(isGood?C.good:C.warnHigh);
-    displayVal=(value>0?'+':'')+(value<0?'−':'')+Math.abs(value).toFixed(1);
-    if(value<0)displayVal='−'+Math.abs(value).toFixed(1);
+  let displayVal='—';
+  if(!isNull){
+    if(plain){
+      displayVal=value+' '+unit;
+    }else{
+      const sign=value>=0?'+':'−';
+      displayVal=sign+Math.abs(value).toFixed(2).replace('.',',')+' '+unit;
+    }
   }
-  return html`<${Card} padding=${14}>
-    <div style=${{fontSize:11,fontWeight:600,color:C.muted,letterSpacing:0.3,textTransform:'uppercase',marginBottom:6,display:'flex',alignItems:'center',gap:6}}>
-      <div style=${{width:7,height:7,borderRadius:4,background:color}}></div>
-      ${label}
-    </div>
-    <div style=${{fontSize:22,fontWeight:700,fontVariantNumeric:'tabular-nums',color:plain?C.text:deltaColor}}>
-      ${displayVal}<span style=${{fontSize:13,fontWeight:500,color:C.muted}}> ${unit}</span>
-    </div>
+  return html`<div style=${{background:C.card,borderRadius:16,padding:14,flex:1,minWidth:0,boxShadow:'0 1px 0 rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.04)'}}>
+    <div style=${{fontSize:11,color:C.muted,fontWeight:600,letterSpacing:0.3,textTransform:'uppercase',marginBottom:6}}>${label}</div>
+    <div style=${{fontSize:22,fontWeight:700,color:plain?C.text:(color||C.text),fontVariantNumeric:'tabular-nums',lineHeight:1.05}}>${displayVal}</div>
+    ${sub?html`<div style=${{fontSize:11,color:C.muted,marginTop:4}}>${sub}</div>`:null}
   <//>`;
 }
 
-/* Chart wrapper — loads Chart.js, renders canvas, handles lifecycle */
-function ChartCanvas({id,data,milestones,renderer}){
+function LegendDot({c,label}){
+  return html`<span style=${{fontSize:11,color:'#777',display:'inline-flex',alignItems:'center',gap:4}}>
+    <span style=${{width:8,height:8,borderRadius:4,background:c,display:'inline-block'}}></span>
+    ${label}
+  </span>`;
+}
+
+/* Chart wrapper */
+function ChartCanvas({id,data,milestones,renderer,height=180}){
   const canvasRef=useRef(null);
   const chartRef=useRef(null);
   const[ready,setReady]=useState(chartJsLoaded);
@@ -836,43 +847,53 @@ function ChartCanvas({id,data,milestones,renderer}){
     return()=>{if(chartRef.current){chartRef.current.destroy();chartRef.current=null}};
   },[ready,data,milestones]);
 
-  return html`<${Card} padding=${12} style=${{position:'relative'}}>
-    ${!ready?html`<div class=skel style=${{height:200}}></div>`:html`<canvas ref=${canvasRef} style=${{width:'100%',height:'auto'}}></canvas>`}
+  return html`<${Card} padding=${12}>
+    ${!ready?html`<div class=skel style=${{height}}></div>`:html`<div style=${{height,position:'relative'}}><canvas ref=${canvasRef}></canvas></div>`}
   <//>`;
 }
 
-/* Milestone plugin for Chart.js */
+/* Milestone plugin */
 function milestonePlugin(milestones){
   return{
     id:'milestones',
-    afterDraw(chart){
+    afterDatasetsDraw(chart){
       if(!milestones?.length)return;
-      const{ctx,chartArea:{top,bottom},scales:{x}}=chart;
+      const{ctx,chartArea:{top,bottom,left,right},scales:{x}}=chart;
       const labels=chart.data.labels;
       for(const ms of milestones){
         const idx=labels.indexOf(ms.date);
         if(idx<0)continue;
         const px=x.getPixelForValue(idx);
+        if(px<left||px>right)continue;
         ctx.save();
-        ctx.strokeStyle='rgba(0,0,0,0.12)';
-        ctx.setLineDash([4,4]);
+        ctx.strokeStyle='rgba(26,26,26,0.20)';
+        ctx.setLineDash([3,3]);
         ctx.lineWidth=1;
         ctx.beginPath();ctx.moveTo(px,top);ctx.lineTo(px,bottom);ctx.stroke();
         ctx.setLineDash([]);
-        ctx.fillStyle='rgba(0,0,0,0.35)';
-        ctx.font='600 9px -apple-system, sans-serif';
-        ctx.textAlign='center';
-        ctx.fillText(ms.title.slice(0,16),px,top-4);
         ctx.restore();
       }
     }
   };
 }
 
-/* Date label formatter for x-axis */
 function fmtLabel(ds){const p=ds.split('-');return p[2]+'.'+p[1]+'.'}
 
-/* Rolling average helper */
+/* Linear regression for trend lines */
+function regress(values){
+  const pts=values.map((y,i)=>({x:i,y})).filter(p=>p.y!=null);
+  if(pts.length<2)return values.map(()=>null);
+  const n=pts.length;
+  const sx=pts.reduce((s,p)=>s+p.x,0);
+  const sy=pts.reduce((s,p)=>s+p.y,0);
+  const sxy=pts.reduce((s,p)=>s+p.x*p.y,0);
+  const sxx=pts.reduce((s,p)=>s+p.x*p.x,0);
+  const m=(n*sxy-sx*sy)/(n*sxx-sx*sx);
+  const b=(sy-m*sx)/n;
+  return values.map((_,i)=>m*i+b);
+}
+
+/* Rolling average */
 function rollingAvg(arr,window=7){
   const result=[];
   for(let i=0;i<arr.length;i++){
@@ -883,16 +904,19 @@ function rollingAvg(arr,window=7){
   return result;
 }
 
-/* Chart configs */
+/* Chart shared config */
 const chartDefaults={
   responsive:true,
-  maintainAspectRatio:true,
-  aspectRatio:1.7,
-  animation:{duration:400},
-  plugins:{legend:{display:false},tooltip:{backgroundColor:'#1a1a1a',titleFont:{size:12,weight:'600'},bodyFont:{size:12},cornerRadius:10,padding:10,displayColors:false,callbacks:{title:(items)=>{const ds=items[0]?.label||'';const p=ds.split('.');return(p[0]||'')+'. '+(p[1]||'')+'.'}}}}
+  maintainAspectRatio:false,
+  animation:false,
+  plugins:{legend:{display:false},tooltip:{backgroundColor:'#1a1a1a',titleFont:{size:12,weight:'600'},bodyFont:{size:12},cornerRadius:10,padding:10,displayColors:false}},
+  scales:{
+    x:{ticks:{maxRotation:0,autoSkip:true,maxTicksLimit:8,font:{size:9},color:'#999'},grid:{display:false}},
+    y:{ticks:{font:{size:9},color:'#999'},grid:{color:'#f0f0ed'},border:{display:false}}
+  }
 };
-const scaleDefaults={x:{ticks:{maxRotation:0,autoSkip:true,maxTicksLimit:8,font:{size:10},color:'#aaa'},grid:{display:false}},y:{ticks:{font:{size:10},color:'#aaa'},grid:{color:'rgba(0,0,0,0.04)'},border:{display:false}}};
 
+/* Body comp: data lines + linear regression trend lines (dashed, 50% transparent) */
 function renderBodyCompChart(ctx,data,milestones){
   const Chart=window._Chart;
   const rows=data.filter(d=>d.fat_mass_kg!=null||d.muscle_mass_kg!=null);
@@ -900,21 +924,22 @@ function renderBodyCompChart(ctx,data,milestones){
   const labels=rows.map(d=>d.date);
   const fat=rows.map(d=>d.fat_mass_kg);
   const mus=rows.map(d=>d.muscle_mass_kg);
-  const fatAvg=rollingAvg(fat);
-  const musAvg=rollingAvg(mus);
+  const fatTrend=regress(fat);
+  const musTrend=regress(mus);
   return new Chart(ctx,{
     type:'line',
-    data:{labels:labels.map(fmtLabel),datasets:[
-      {label:'Fettmasse',data:fat,borderColor:C.fettmasse,backgroundColor:C.fettmasse+'30',pointRadius:2.5,pointBackgroundColor:C.fettmasse,borderWidth:1.5,tension:0.3,spanGaps:true},
-      {label:'Fett ⌀7d',data:fatAvg,borderColor:C.fettmasse,borderWidth:2.5,borderDash:[],pointRadius:0,tension:0.4,spanGaps:true},
-      {label:'Muskelmasse',data:mus,borderColor:C.muskelmasse,backgroundColor:C.muskelmasse+'30',pointRadius:2.5,pointBackgroundColor:C.muskelmasse,borderWidth:1.5,tension:0.3,spanGaps:true},
-      {label:'Muskel ⌀7d',data:musAvg,borderColor:C.muskelmasse,borderWidth:2.5,pointRadius:0,tension:0.4,spanGaps:true},
+    data:{labels,datasets:[
+      {label:'Fettmasse',data:fat,borderColor:C.fettmasse,backgroundColor:C.fettmasse,borderWidth:1.5,pointRadius:0,tension:0.3,spanGaps:true},
+      {label:'Fett-Trend',data:fatTrend,borderColor:C.fettmasse+'80',borderWidth:2.5,borderDash:[6,4],pointRadius:0,tension:0,spanGaps:true},
+      {label:'Muskelmasse',data:mus,borderColor:C.muskelmasse,backgroundColor:C.muskelmasse,borderWidth:1.5,pointRadius:0,tension:0.3,spanGaps:true},
+      {label:'Muskel-Trend',data:musTrend,borderColor:C.muskelmasse+'80',borderWidth:2.5,borderDash:[6,4],pointRadius:0,tension:0,spanGaps:true},
     ]},
-    options:{...chartDefaults,plugins:{...chartDefaults.plugins,tooltip:{...chartDefaults.plugins.tooltip,callbacks:{...chartDefaults.plugins.tooltip.callbacks,label:(item)=>`${item.dataset.label}: ${item.raw?.toFixed(1)?.replace('.',',')} kg`}},legend:{display:true,position:'bottom',labels:{boxWidth:10,boxHeight:10,borderRadius:5,useBorderRadius:true,padding:12,font:{size:11},filter:(item)=>!item.text.includes('⌀7d')}}},scales:{...scaleDefaults}},
+    options:{...chartDefaults,scales:{...chartDefaults.scales,x:{...chartDefaults.scales.x,ticks:{...chartDefaults.scales.x.ticks,callback:(v,i)=>fmtLabel(labels[i]||'')}}}},
     plugins:[milestonePlugin(milestones)]
   });
 }
 
+/* Kalorien: filled line chart with rolling 7-day avg (matches prototype) */
 function renderCaloriesChart(ctx,data,milestones){
   const Chart=window._Chart;
   const rows=data.filter(d=>d.kcal!=null||d.kcal_burned!=null);
@@ -925,46 +950,42 @@ function renderCaloriesChart(ctx,data,milestones){
   const eatenAvg=rollingAvg(eaten);
   const burnedAvg=rollingAvg(burned);
   return new Chart(ctx,{
-    type:'bar',
-    data:{labels:labels.map(fmtLabel),datasets:[
-      {label:'Gegessen',data:eaten,backgroundColor:'#F4D03F'+'90',borderRadius:3,barPercentage:0.7,order:2},
-      {label:'Verbrannt',data:burned,backgroundColor:'#E67E22'+'90',borderRadius:3,barPercentage:0.7,order:3},
-      {label:'Gegessen ⌀7d',data:eatenAvg,type:'line',borderColor:'#F4D03F',borderWidth:2,pointRadius:0,tension:0.4,spanGaps:true,order:1},
-      {label:'Verbrannt ⌀7d',data:burnedAvg,type:'line',borderColor:'#E67E22',borderWidth:2,pointRadius:0,tension:0.4,spanGaps:true,order:0},
+    type:'line',
+    data:{labels,datasets:[
+      {label:'Verbrannt (⌀ 7T)',data:burnedAvg,borderColor:'#E67E22',backgroundColor:'#E67E22'+'22',borderWidth:2,pointRadius:0,tension:0.35,fill:true,spanGaps:true},
+      {label:'Gegessen (⌀ 7T)',data:eatenAvg,borderColor:'#C9A100',backgroundColor:'#F4D03F'+'55',borderWidth:2,pointRadius:0,tension:0.35,fill:true,spanGaps:true},
     ]},
-    options:{...chartDefaults,plugins:{...chartDefaults.plugins,legend:{display:true,position:'bottom',labels:{boxWidth:10,boxHeight:10,borderRadius:5,useBorderRadius:true,padding:12,font:{size:11},filter:(item)=>!item.text.includes('⌀7d')}}},scales:{...scaleDefaults,y:{...scaleDefaults.y,beginAtZero:false,ticks:{...scaleDefaults.y.ticks,callback:v=>v>=1000?(v/1000).toFixed(1)+'k':v}}}},
+    options:{...chartDefaults,scales:{...chartDefaults.scales,x:{...chartDefaults.scales.x,ticks:{...chartDefaults.scales.x.ticks,callback:(v,i)=>fmtLabel(labels[i]||'')}},y:{...chartDefaults.scales.y,suggestedMin:1500,suggestedMax:2700}}},
     plugins:[milestonePlugin(milestones)]
   });
 }
 
+/* Schritte: bar chart with single color + goal line */
 function renderStepsChart(ctx,data,milestones){
   const Chart=window._Chart;
   const rows=data.filter(d=>d.steps!=null&&d.steps>0);
   if(!rows.length)return null;
   const labels=rows.map(d=>d.date);
   const steps=rows.map(d=>d.steps);
-  const avg=rollingAvg(steps);
   return new Chart(ctx,{
     type:'bar',
-    data:{labels:labels.map(fmtLabel),datasets:[
-      {label:'Schritte',data:steps,backgroundColor:rows.map(d=>d.steps>=7500?C.good+'70':'#ddd'),borderRadius:3,barPercentage:0.7,order:1},
-      {label:'⌀ 7 Tage',data:avg,type:'line',borderColor:C.text,borderWidth:2,pointRadius:0,tension:0.4,spanGaps:true,order:0},
+    data:{labels,datasets:[
+      {label:'Schritte',data:steps,backgroundColor:'#bcd0c8',borderRadius:2,barPercentage:0.85,categoryPercentage:0.9},
     ]},
-    options:{...chartDefaults,aspectRatio:2,plugins:{...chartDefaults.plugins,legend:{display:false}},scales:{...scaleDefaults,y:{...scaleDefaults.y,beginAtZero:true,ticks:{...scaleDefaults.y.ticks,callback:v=>v>=1000?(v/1000).toFixed(0)+'k':v}}}},
+    options:{...chartDefaults,scales:{...chartDefaults.scales,x:{...chartDefaults.scales.x,ticks:{...chartDefaults.scales.x.ticks,callback:(v,i)=>fmtLabel(labels[i]||'')}},y:{...chartDefaults.scales.y,suggestedMin:0,suggestedMax:14000}}},
     plugins:[milestonePlugin(milestones),{
       id:'goalLine',
-      afterDraw(chart){
+      afterDatasetsDraw(chart){
         const{ctx:c,chartArea:{left,right},scales:{y}}=chart;
         const py=y.getPixelForValue(7500);
-        c.save();c.strokeStyle=C.good;c.lineWidth=1.5;c.setLineDash([6,4]);
-        c.beginPath();c.moveTo(left,py);c.lineTo(right,py);c.stroke();
-        c.setLineDash([]);c.fillStyle=C.good;c.font='600 9px -apple-system, sans-serif';c.textAlign='right';
-        c.fillText('7.500',right-2,py-5);c.restore();
+        c.save();c.strokeStyle='#1f7a4d';c.setLineDash([4,3]);c.lineWidth=1;
+        c.beginPath();c.moveTo(left,py);c.lineTo(right,py);c.stroke();c.restore();
       }
     }]
   });
 }
 
+/* Tonnage: bar chart, color by training day */
 function renderTonnageChart(ctx,data,milestones){
   const Chart=window._Chart;
   const rows=data.filter(d=>d.training_volume_kg!=null&&d.training_volume_kg>0);
@@ -972,19 +993,17 @@ function renderTonnageChart(ctx,data,milestones){
   const labels=rows.map(d=>d.date);
   const tons=rows.map(d=>Math.round(d.training_volume_kg/1000*10)/10);
   const colors=rows.map(d=>{
-    if(!d.training)return C.muted;
-    const t=d.training.toLowerCase();
-    if(t.includes('hinge')||t.includes('pull'))return C.workout+'cc';
-    if(t.includes('squat')||t.includes('push'))return C.friday+'cc';
-    if(t.includes('heavy')||t.includes('compound'))return C.protein+'cc';
-    return C.muted+'aa';
+    const t=(d.training||'').toLowerCase();
+    if(t.includes('hinge')||t.includes('pull'))return'#A42059';
+    if(t.includes('squat')||t.includes('push'))return'#623c6d';
+    return'#205781';
   });
   return new Chart(ctx,{
     type:'bar',
-    data:{labels:labels.map(fmtLabel),datasets:[
-      {label:'Tonnage',data:tons,backgroundColor:colors,borderRadius:4,barPercentage:0.65},
+    data:{labels,datasets:[
+      {label:'Tonnage',data:tons,backgroundColor:colors,borderRadius:2,barPercentage:0.7,categoryPercentage:0.9},
     ]},
-    options:{...chartDefaults,aspectRatio:2,plugins:{...chartDefaults.plugins,legend:{display:false},tooltip:{...chartDefaults.plugins.tooltip,callbacks:{...chartDefaults.plugins.tooltip.callbacks,label:(item)=>{const row=rows[item.dataIndex];return[`${item.raw} t`,row?.training||''].filter(Boolean)}}}},scales:{...scaleDefaults,y:{...scaleDefaults.y,beginAtZero:true,ticks:{...scaleDefaults.y.ticks,callback:v=>v+'t'}}}},
+    options:{...chartDefaults,plugins:{...chartDefaults.plugins,tooltip:{...chartDefaults.plugins.tooltip,callbacks:{label:(item)=>{const row=rows[item.dataIndex];return[item.raw+' t',row?.training||''].filter(Boolean)}}}},scales:{...chartDefaults.scales,x:{...chartDefaults.scales.x,ticks:{...chartDefaults.scales.x.ticks,callback:(v,i)=>fmtLabel(labels[i]||'')}},y:{...chartDefaults.scales.y,beginAtZero:true,ticks:{...chartDefaults.scales.y.ticks,callback:v=>v+'t'}}}},
     plugins:[milestonePlugin(milestones)]
   });
 }
