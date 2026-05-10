@@ -312,7 +312,7 @@ function parseFddb(csv){
 }
 
 function parseTonnage(csv){
-  // Format: date,day,tonnage (from SQL export) or tab-separated
+  // Format: date,day,plan_version,workout_name,tonnage (from SQL export) or tab-separated
   const lines=csv.trim().split('\n').filter(l=>l.trim());
   const results=[];
   for(const line of lines){
@@ -321,9 +321,69 @@ function parseTonnage(csv){
     if(cols[0]==='date'||!cols[0].match(/^\d{4}-/))continue; // skip header
     const date=cols[0].slice(0,10);
     const tonnage=Math.round(parseFloat(cols[cols.length-1])||0);
-    if(tonnage>0)results.push({date,training_volume_kg:tonnage});
+    // cols: date[0], day[1], plan_version[2], workout_name[3], tonnage[4]
+    const workout_name=cols.length>=5?cols[3]:'';
+    const plan_version=cols.length>=5?cols[2]:'';
+    if(tonnage>0)results.push({date,training_volume_kg:tonnage,workout_name,plan_version});
   }
   return results;
+}
+
+function parseSheetCSV(csv){
+  // Google Sheet CSV: Datum col[2] = "Fr., 09.01.2026", kcal col[3] = "1.902", Fett col[6], KH col[7], Protein col[8]
+  // German number format: 1.902 = 1902, commas for decimals
+  const lines=csv.replace(/\r\n/g,'\n').replace(/\r/g,'\n').trim().split('\n');
+  // Parse with simple CSV logic (handle quoted fields with newlines)
+  const results=[];
+  let i=0;
+  // Skip header (first line containing "Datum")
+  while(i<lines.length&&!lines[i].includes('Datum'))i++;
+  if(i<lines.length)i++; // skip header line
+  
+  // Rejoin lines for proper CSV parsing (some fields have embedded newlines)
+  const body=lines.slice(i).join('\n');
+  // Simple CSV row parser
+  const parseRow=(text)=>{
+    const fields=[];let field='';let inQ=false;
+    for(let j=0;j<text.length;j++){
+      const ch=text[j];
+      if(inQ){
+        if(ch==='"'&&text[j+1]==='"'){field+='"';j++}
+        else if(ch==='"')inQ=false;
+        else field+=ch;
+      }else{
+        if(ch==='"')inQ=true;
+        else if(ch===','){fields.push(field);field=''}
+        else if(ch==='\n'&&!inQ){fields.push(field);return{fields,consumed:j+1}}
+        else field+=ch;
+      }
+    }
+    fields.push(field);
+    return{fields,consumed:text.length};
+  };
+  
+  let pos=0;
+  while(pos<body.length){
+    const{fields,consumed}=parseRow(body.slice(pos));
+    pos+=consumed;
+    if(fields.length<9)continue;
+    // Parse date from col[2]: "Fr., 09.01.2026"
+    const dtMatch=(fields[2]||'').match(/(\d{2})\.(\d{2})\.(\d{4})/);
+    if(!dtMatch)continue;
+    const[,dd,mm,yyyy]=dtMatch;
+    const date=`${yyyy}-${mm}-${dd}`;
+    // Only import up to 2026-05-03 (fddb takes over from 2026-05-04)
+    if(date>='2026-05-04')continue;
+    // Parse kcal: "1.902" → 1902 (German thousands separator)
+    const parseDE=(s)=>{const v=(s||'').trim().replace(/\./g,'').replace(',','.');const n=parseFloat(v);return isNaN(n)?null:Math.round(n)};
+    const kcal=parseDE(fields[3]);
+    if(!kcal||kcal<800)continue; // skip empty/invalid rows
+    const fat=parseDE(fields[6]);
+    const carbs=parseDE(fields[7]);
+    const protein=parseDE(fields[8]);
+    results.push({date,kcal,protein_g:protein,carbs_g:carbs,fat_g:fat});
+  }
+  return results.sort((a,b)=>a.date.localeCompare(b.date));
 }
 
 // Plan version from date (for Garmin activities)
@@ -454,12 +514,19 @@ async function importGarminCycles(uid,days){
 async function importTonnage(uid,days){
   let updated=0,created=0;
   for(const d of days){
-    const{data:ex}=await sb.from('daily_tracking').select('id').eq('user_id',uid).eq('date',d.date).maybeSingle();
+    const{data:ex}=await sb.from('daily_tracking').select('id,training').eq('user_id',uid).eq('date',d.date).maybeSingle();
+    const upd={training_volume_kg:d.training_volume_kg,updated_at:new Date().toISOString()};
+    // Write workout_name as training if not already set from Garmin
+    if(d.workout_name){
+      const planStr=d.plan_version?d.plan_version+' ':'';
+      if(!ex?.training)upd.training=planStr+d.workout_name;
+      if(d.plan_version)upd.plan_version=d.plan_version;
+    }
     if(ex){
-      await sb.from('daily_tracking').update({training_volume_kg:d.training_volume_kg,updated_at:new Date().toISOString()}).eq('id',ex.id);
+      await sb.from('daily_tracking').update(upd).eq('id',ex.id);
       updated++;
     }else{
-      await sb.from('daily_tracking').insert({user_id:uid,date:d.date,training_volume_kg:d.training_volume_kg,updated_at:new Date().toISOString()});
+      await sb.from('daily_tracking').insert({user_id:uid,date:d.date,...upd});
       created++;
     }
   }
@@ -498,6 +565,7 @@ function ImportTab({user,toast}){
   const[garminStatus,setGarminStatus]=useState(null);
   const fileRef=useRef(null);
   const fddbRef=useRef(null);
+  const sheetRef=useRef(null);
 
   // Load cutoff from localStorage
   const getCutoff=()=>{try{return localStorage.getItem('ut_cutoff')||DEFAULT_CUTOFF}catch(e){return DEFAULT_CUTOFF}};
@@ -527,6 +595,26 @@ function ImportTab({user,toast}){
     }catch(e){console.error(e);toast('Fehler: '+e.message)}
     setImporting(false);
     if(fddbRef.current)fddbRef.current.value='';
+  };
+
+  // --- Google Sheet CSV upload (historical data, up to 2026-05-03) ---
+  const handleSheetFile=async(e)=>{
+    const file=e.target.files?.[0];if(!file)return;
+    setImporting(true);setFeedback(null);
+    try{
+      const text=await file.text();
+      let days=parseSheetCSV(text);
+      days=filterCutoff(days);
+      if(!days.length){toast('Keine gültigen Tage gefunden');setImporting(false);return}
+      const result=await importFddb(user.id,days); // same upsert logic
+      await logImport(user.id,'sheet',days,file.name);
+      const dates=days.map(d=>d.date).sort();
+      setFeedback({source:'sheet',msg:`${days.length} Tage importiert — ${result.updated} aktualisiert, ${result.created} neu.`,range:fmtRange(dates[0],dates[dates.length-1])});
+      const{data:newLogs}=await sb.from('import_log').select('*').eq('user_id',user.id).order('imported_at',{ascending:false}).limit(10);
+      setLogs(newLogs||[]);
+    }catch(e){console.error(e);toast('Fehler: '+e.message)}
+    setImporting(false);
+    if(sheetRef.current)sheetRef.current.value='';
   };
 
   // --- Garmin ZIP upload ---
@@ -624,12 +712,24 @@ function ImportTab({user,toast}){
           <div style=${{width:44,height:44,borderRadius:12,background:'#f4f4f2',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>🍎</div>
           <div style=${{flex:1,minWidth:0}}>
             <div style=${{fontSize:15,fontWeight:600}}>fddb CSV importieren</div>
-            <div style=${{fontSize:11,color:C.muted,marginTop:2}}>fddb Tagebuch → Datei → Exportieren</div>
+            <div style=${{fontSize:11,color:C.muted,marginTop:2}}>Ab 04.05.2026 · fddb Tagebuch → Datei → Exportieren</div>
           </div>
           <div style=${{fontSize:13,color:C.muted}}>📄</div>
         </div>
         <input ref=${fddbRef} type=file accept=".csv,.txt" onChange=${handleFddbFile} style=${{display:'none'}}/>
         ${feedback?.source==='fddb'?html`<div style=${{padding:'0 14px 14px'}}><div style=${{padding:12,background:'rgba(31,122,77,0.08)',border:'1px solid rgba(31,122,77,0.20)',borderRadius:10,fontSize:13,color:C.good,fontWeight:600}}>✓ ${feedback.msg}<br/><span style=${{fontWeight:500,color:C.muted,fontSize:11}}>${feedback.range}</span></div></div>`:null}
+      <//>
+      <${Card} padding=${0} style=${{marginTop:8}}>
+        <div onClick=${()=>!importing&&sheetRef.current?.click()} style=${{display:'flex',alignItems:'center',gap:14,padding:14,cursor:'pointer'}}>
+          <div style=${{width:44,height:44,borderRadius:12,background:'#f4f4f2',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>📊</div>
+          <div style=${{flex:1,minWidth:0}}>
+            <div style=${{fontSize:15,fontWeight:600}}>Google Sheet CSV importieren</div>
+            <div style=${{fontSize:11,color:C.muted,marginTop:2}}>Historische Daten bis 03.05.2026</div>
+          </div>
+          <div style=${{fontSize:13,color:C.muted}}>📄</div>
+        </div>
+        <input ref=${sheetRef} type=file accept=".csv" onChange=${handleSheetFile} style=${{display:'none'}}/>
+        ${feedback?.source==='sheet'?html`<div style=${{padding:'0 14px 14px'}}><div style=${{padding:12,background:'rgba(31,122,77,0.08)',border:'1px solid rgba(31,122,77,0.20)',borderRadius:10,fontSize:13,color:C.good,fontWeight:600}}>✓ ${feedback.msg}<br/><span style=${{fontWeight:500,color:C.muted,fontSize:11}}>${feedback.range}</span></div></div>`:null}
       <//>
 
       <!-- Garmin -->
@@ -725,28 +825,24 @@ function DashboardTab({user}){
     });
   },[user.id,range]);
 
-  // KPIs — split data in half, compare averages (matches prototype)
+  // KPIs — simple delta: last value minus first value in period
   const kpis=useMemo(()=>{
     if(!data||!data.length)return null;
-    const half=Math.floor(data.length/2);
-    const firstHalf=data.slice(0,half);
-    const lastHalf=data.slice(half);
     const avg=(arr,key)=>{const vals=arr.filter(d=>d[key]!=null).map(d=>d[key]);return vals.length?vals.reduce((a,b)=>a+b,0)/vals.length:null};
-    const avgFatFirst=avg(firstHalf,'fat_mass_kg');
-    const avgFatLast=avg(lastHalf,'fat_mass_kg');
-    const avgMusFirst=avg(firstHalf,'muscle_mass_kg');
-    const avgMusLast=avg(lastHalf,'muscle_mass_kg');
+    // Find first and last non-null values for fat and muscle
+    const fatRows=data.filter(d=>d.fat_mass_kg!=null);
+    const musRows=data.filter(d=>d.muscle_mass_kg!=null);
+    const dFat=fatRows.length>=2?round1(fatRows[fatRows.length-1].fat_mass_kg-fatRows[0].fat_mass_kg):null;
+    const dMus=musRows.length>=2?round1(musRows[musRows.length-1].muscle_mass_kg-musRows[0].muscle_mass_kg):null;
     const avgProtein=avg(data,'protein_g');
     const kraftCount=data.filter(d=>d.training&&/v\d|FH/.test(d.training)).length;
-    const dFat=avgFatFirst!=null&&avgFatLast!=null?avgFatLast-avgFatFirst:null;
-    const dMus=avgMusFirst!=null&&avgMusLast!=null?avgMusLast-avgMusFirst:null;
     return{dFat,dMus,avgProtein:avgProtein!=null?Math.round(avgProtein):null,kraftCount};
   },[data]);
 
   const ps=PERIOD_SHORT[range]||'';
 
   if(loading)return html`<div style=${{paddingBottom:110,minHeight:'100dvh'}}>
-    <div style=${{padding:'16px 18px 4px',display:'flex',alignItems:'baseline',justifyContent:'space-between'}}><h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Trends</h1><span style=${{fontSize:12,color:C.muted}}>für Friederike</span></div>
+    <div style=${{padding:'16px 18px 4px'}}><h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Dashboard</h1></div>
     <div style=${{padding:'20px 18px',display:'flex',flexDirection:'column',gap:12}}>
       <div class=skel style=${{height:80}}></div>
       <div class=skel style=${{height:220}}></div>
@@ -755,9 +851,8 @@ function DashboardTab({user}){
   </div>`;
 
   return html`<div style=${{paddingBottom:110}}>
-    <div style=${{padding:'8px 18px 4px',display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
-      <h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Trends</h1>
-      <span style=${{fontSize:12,color:C.muted}}>für Friederike</span>
+    <div style=${{padding:'8px 18px 4px'}}>
+      <h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Dashboard</h1>
     </div>
 
     <div style=${{padding:'0 18px'}}>
@@ -784,6 +879,11 @@ function DashboardTab({user}){
 
       <${SectionLabel} right="Ziel 7.500">Schritte<//>
       <${ChartCanvas} id="steps" data=${data} milestones=${milestones} renderer=${renderStepsChart} height=${120}/>
+
+      <${SectionLabel} right=${html`<span style=${{display:'inline-flex',gap:10}}><${LegendDot} c=${C.muskelmasse} label="Kraft"/><${LegendDot} c=${C.rest} label="CnS"/></span>`}>Trainings-Kalender<//>
+      <${Card} padding=${14}>
+        <${TrainingCalendar} data=${data}/>
+      <//>
 
       <${SectionLabel} right=${html`<span style=${{display:'inline-flex',gap:10}}><${LegendDot} c=${'#A42059'} label="Hinge+Pull"/><${LegendDot} c=${'#623c6d'} label="Squat+Push"/><${LegendDot} c=${'#205781'} label="Compounds"/></span>`}>Trainings-Volumen<//>
       <${ChartCanvas} id="tonnage" data=${data} milestones=${milestones} renderer=${renderTonnageChart} height=${130}/>
@@ -996,6 +1096,11 @@ function renderTonnageChart(ctx,data,milestones){
     const t=(d.training||'').toLowerCase();
     if(t.includes('hinge')||t.includes('pull'))return'#A42059';
     if(t.includes('squat')||t.includes('push'))return'#623c6d';
+    if(t.includes('heavy')||t.includes('compound')||t.includes('full'))return'#205781';
+    // Fallback: use day-of-week (Mo/Sa=Hinge+Pull, Do=Squat+Push, else=Compounds)
+    const dow=parseDateLocal(d.date).getDay();
+    if(dow===1||dow===6)return'#A42059'; // Mo, Sa
+    if(dow===4)return'#623c6d'; // Do
     return'#205781';
   });
   return new Chart(ctx,{
@@ -1006,6 +1111,134 @@ function renderTonnageChart(ctx,data,milestones){
     options:{...chartDefaults,plugins:{...chartDefaults.plugins,tooltip:{...chartDefaults.plugins.tooltip,callbacks:{label:(item)=>{const row=rows[item.dataIndex];return[item.raw+' t',row?.training||''].filter(Boolean)}}}},scales:{...chartDefaults.scales,x:{...chartDefaults.scales.x,ticks:{...chartDefaults.scales.x.ticks,callback:(v,i)=>fmtLabel(labels[i]||'')}},y:{...chartDefaults.scales.y,beginAtZero:true,ticks:{...chartDefaults.scales.y.ticks,callback:v=>v+'t'}}}},
     plugins:[milestonePlugin(milestones)]
   });
+}
+
+/* ═══════════════════════════════════════════
+   TRAINING CALENDAR
+   ═══════════════════════════════════════════ */
+
+// Plan: Kraft Mo(1)/Do(4)/Sa(6), CnS Mi(3)
+const PLAN_KRAFT=[1,4,6];
+const PLAN_CNS=[3];
+const DOW_LABELS=['Mo','Di','Mi','Do','Fr','Sa','So'];
+
+function TrainingCalendar({data}){
+  const[monthOffset,setMonthOffset]=useState(0);
+  const today=parseDateLocal(localDate());
+  const view=new Date(today.getFullYear(),today.getMonth()+monthOffset,1);
+  const monthName=view.toLocaleDateString('de-DE',{month:'long',year:'numeric'});
+
+  // Build calendar grid (Mo-anchored)
+  const firstDay=new Date(view);
+  const firstDow=(firstDay.getDay()+6)%7; // Mon=0
+  const gridStart=new Date(firstDay);
+  gridStart.setDate(firstDay.getDate()-firstDow);
+  const lastDay=new Date(view.getFullYear(),view.getMonth()+1,0);
+  const lastDow=(lastDay.getDay()+6)%7;
+  const gridEnd=new Date(lastDay);
+  gridEnd.setDate(lastDay.getDate()+(6-lastDow));
+  const totalDays=Math.round((gridEnd-gridStart)/86400000)+1;
+
+  // Map data by date
+  const byDate=new Map((data||[]).map(r=>[r.date,r]));
+
+  const weeks=[];
+  for(let w=0;w<totalDays/7;w++){
+    const week=[];
+    for(let i=0;i<7;i++){
+      const d=new Date(gridStart);
+      d.setDate(gridStart.getDate()+w*7+i);
+      const ds=localDate(d);
+      const r=byDate.get(ds);
+      const inMonth=d.getMonth()===view.getMonth();
+      const isFuture=d>today;
+      const isToday=ds===localDate();
+      week.push({date:d,ds,row:r,inMonth,isFuture,isToday});
+    }
+    weeks.push(week);
+  }
+
+  // Counts for displayed month
+  let kraftDone=0,cnsDone=0,kraftPlanned=0,cnsPlanned=0;
+  weeks.flat().forEach(c=>{
+    if(!c.inMonth)return;
+    const realDow=c.date.getDay();
+    if(PLAN_KRAFT.includes(realDow))kraftPlanned++;
+    if(PLAN_CNS.includes(realDow))cnsPlanned++;
+    if(c.row){
+      const t=c.row.training||'';
+      if(/v\d|FH/.test(t))kraftDone++;
+      if(/CnS/.test(t))cnsDone++;
+    }
+  });
+
+  const navBtnStyle={width:30,height:30,borderRadius:15,background:'#f0f0ee',border:'none',fontSize:18,color:C.text,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:600};
+
+  return html`<div>
+    <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
+      <button onClick=${()=>setMonthOffset(monthOffset-1)} style=${navBtnStyle}>‹</button>
+      <div style=${{fontSize:14,fontWeight:700,textTransform:'capitalize'}}>${monthName}</div>
+      <button onClick=${()=>setMonthOffset(monthOffset+1)} style=${navBtnStyle} disabled=${monthOffset>=0}>
+        <span style=${{opacity:monthOffset>=0?.3:1}}>›</span>
+      </button>
+    </div>
+
+    <div style=${{display:'grid',gridTemplateColumns:'repeat(7, 1fr)',gap:4,marginBottom:4}}>
+      ${DOW_LABELS.map(d=>html`<div key=${d} style=${{fontSize:10,color:C.muted,fontWeight:700,textAlign:'center',letterSpacing:0.4}}>${d}</div>`)}
+    </div>
+
+    <div style=${{display:'grid',gap:4}}>
+      ${weeks.map((w,wi)=>html`<div key=${wi} style=${{display:'grid',gridTemplateColumns:'repeat(7, 1fr)',gap:4}}>
+        ${w.map((cell,di)=>{
+          const realDow=cell.date.getDay();
+          const planK=PLAN_KRAFT.includes(realDow);
+          const planCns=PLAN_CNS.includes(realDow);
+          const t=(cell.row?.training||'');
+          const didK=/v\d|FH/.test(t);
+          const didC=/CnS/.test(t);
+          const dim=!cell.inMonth;
+          return html`<div key=${di} style=${{aspectRatio:'1',position:'relative',borderRadius:8,background:dim?'transparent':'#fafaf8',border:cell.isToday?'1.5px solid '+C.text:'1px solid '+(dim?'transparent':C.border),opacity:dim?.35:1,display:'flex',flexDirection:'column',padding:4,overflow:'hidden'}}>
+            <div style=${{fontSize:10,fontWeight:600,color:C.muted,fontVariantNumeric:'tabular-nums',lineHeight:1,textAlign:'right'}}>${cell.date.getDate()}</div>
+            <div style=${{flex:1,display:'flex',alignItems:'flex-end',justifyContent:'center',gap:2,paddingBottom:2}}>
+              ${planK?html`<${CalPill} color=${C.muskelmasse} done=${didK} future=${cell.isFuture} label="K"/>`:null}
+              ${planCns?html`<${CalPill} color=${C.rest} done=${didC} future=${cell.isFuture} label="C"/>`:null}
+              ${!planK&&didK?html`<${CalPill} color=${C.muskelmasse} done=${true} extra=${true} label="K"/>`:null}
+              ${!planCns&&didC?html`<${CalPill} color=${C.rest} done=${true} extra=${true} label="C"/>`:null}
+            </div>
+          </div>`;
+        })}
+      </div>`)}
+    </div>
+
+    <div style=${{display:'flex',justifyContent:'space-between',marginTop:14,paddingTop:12,borderTop:'1px solid '+C.border,gap:12}}>
+      <${CountBlock} color=${C.muskelmasse} label="Kraft" done=${kraftDone} planned=${kraftPlanned}/>
+      <${CountBlock} color=${C.rest} label="CnS" done=${cnsDone} planned=${cnsPlanned}/>
+    </div>
+    <div style=${{fontSize:10,color:C.muted,marginTop:8,textAlign:'center'}}>Plan: Kraft Mo/Do/Sa · CnS Mi</div>
+  </div>`;
+}
+
+function CalPill({color,done,future,extra,label}){
+  const base={width:14,height:14,borderRadius:4,fontSize:8,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',letterSpacing:0.2};
+  if(done)return html`<div style=${{...base,background:color,color:'#fff',border:extra?'2px solid #fff':'none',boxShadow:extra?'0 0 0 1.5px '+color:'none'}}>${label}</div>`;
+  if(future)return html`<div style=${{...base,background:color+'22',border:'1px dashed '+color+'99',color}}>${label}</div>`;
+  return html`<div style=${{...base,background:'transparent',border:'1px solid #d4d4d0',color:'#bbb'}}>${label}</div>`;
+}
+
+function CountBlock({color,label,done,planned}){
+  const pct=planned>0?Math.round((done/planned)*100):0;
+  return html`<div style=${{flex:1}}>
+    <div style=${{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
+      <span style=${{width:8,height:8,borderRadius:4,background:color}}></span>
+      <span style=${{fontSize:11,color:C.muted,fontWeight:700,textTransform:'uppercase',letterSpacing:0.3}}>${label}</span>
+    </div>
+    <div style=${{fontSize:17,fontWeight:700,color:C.text,fontVariantNumeric:'tabular-nums'}}>
+      ${done}<span style=${{fontSize:12,color:C.muted,fontWeight:500}}> / ${planned} geplant</span>
+    </div>
+    <div style=${{marginTop:4,height:3,borderRadius:2,background:'#ececea',overflow:'hidden'}}>
+      <div style=${{height:'100%',width:Math.min(100,pct)+'%',background:color,borderRadius:2}}></div>
+    </div>
+  </div>`;
 }
 
 /* Placeholder (for Tabelle only) */
