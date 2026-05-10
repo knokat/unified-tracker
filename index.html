@@ -115,6 +115,7 @@ function App(){
   return html`<div style=${{minHeight:'100dvh',background:C.bg}}>
     ${ToastEl}
     ${scr==='heute'?html`<${HeuteTab} user=${user} toast=${toast} onSettings=${()=>setScr('settings')}/>`:
+      scr==='dashboard'?html`<${DashboardTab} user=${user}/>`:
       scr==='import'?html`<${ImportTab} user=${user} toast=${toast}/>`:
       scr==='settings'?html`<${SettingsTab} user=${user} onBack=${()=>setScr('heute')}/>`:
       html`<${PlaceholderTab} id=${scr}/>`}
@@ -684,8 +685,312 @@ function ImportTab({user,toast}){
   </div>`;
 }
 
-/* Placeholder */
-function PlaceholderTab({id}){const labels={dashboard:'Dashboard',tabelle:'Tabelle'};const icons={dashboard:'📊',tabelle:'📋'};return html`<div style=${{paddingBottom:110,minHeight:'100dvh'}}><div style=${{padding:'60px 20px',textAlign:'center'}}><div style=${{fontSize:48,marginBottom:16}}>${icons[id]}</div><h2 style=${{fontSize:22,fontWeight:700,marginBottom:8}}>${labels[id]}</h2><div style=${{fontSize:14,color:C.muted}}>Kommt in Phase 3</div><div style=${{fontSize:13,color:C.muted,marginTop:8}}>${id==='dashboard'?'Charts, Trends und KPI-Cards':'Sheet-Layout mit allen Daten'}</div></div></div>`}
+/* ═══════════════════════════════════════════
+   DASHBOARD TAB
+   ═══════════════════════════════════════════ */
+
+let chartJsLoaded=false;
+async function loadChartJs(){
+  if(chartJsLoaded)return;
+  const mod=await import('https://cdn.jsdelivr.net/npm/chart.js@4.4.7/+esm');
+  const Chart=mod.Chart||mod.default;
+  const{LineController,BarController,LineElement,BarElement,PointElement,LinearScale,CategoryScale,Tooltip,Legend,Filler}=mod;
+  Chart.register(LineController,BarController,LineElement,BarElement,PointElement,LinearScale,CategoryScale,Tooltip,Legend,Filler);
+  window._Chart=Chart;
+  chartJsLoaded=true;
+}
+
+const RANGES=[{key:'4w',label:'4 Wochen',days:28},{key:'8w',label:'8 Wochen',days:56},{key:'3m',label:'3 Monate',days:91},{key:'all',label:'Alles',days:9999}];
+
+function DashboardTab({user}){
+  const[range,setRange]=useState('8w');
+  const[data,setData]=useState(null);
+  const[milestones,setMilestones]=useState([]);
+  const[loading,setLoading]=useState(true);
+
+  // Load data
+  useEffect(()=>{
+    setLoading(true);
+    const r=RANGES.find(r=>r.key===range);
+    const endDate=localDate();
+    const startDate=r.days>9000?'2020-01-01':addDays(endDate,-r.days);
+    Promise.all([
+      sb.from('daily_tracking').select('date,weight_kg,body_fat_pct,muscle_pct,fat_mass_kg,muscle_mass_kg,kcal,protein_g,carbs_g,fat_g,kcal_burned,steps,training,training_volume_kg,plan_version,cycle_day,day_type').eq('user_id',user.id).gte('date',startDate).lte('date',endDate).order('date'),
+      sb.from('milestones').select('date,category,title').eq('user_id',user.id).gte('date',startDate).lte('date',endDate).order('date')
+    ]).then(([{data:rows},{data:ms}])=>{
+      setData(rows||[]);
+      setMilestones(ms||[]);
+      setLoading(false);
+    });
+  },[user.id,range]);
+
+  // KPI calculations
+  const kpis=useMemo(()=>{
+    if(!data||!data.length)return null;
+    const today=localDate();
+    const d7=addDays(today,-7);
+    const d14=addDays(today,-14);
+    const last7=data.filter(d=>d.date>d7&&d.date<=today);
+    const prev7=data.filter(d=>d.date>d14&&d.date<=d7);
+    const avg=(arr,key)=>{const vals=arr.filter(d=>d[key]!=null).map(d=>d[key]);return vals.length?vals.reduce((a,b)=>a+b,0)/vals.length:null};
+    const avgFatNow=avg(last7,'fat_mass_kg');
+    const avgFatPrev=avg(prev7,'fat_mass_kg');
+    const avgMusNow=avg(last7,'muscle_mass_kg');
+    const avgMusPrev=avg(prev7,'muscle_mass_kg');
+    const avgProtein=avg(last7,'protein_g');
+    const d28=addDays(today,-28);
+    const kraftCount=data.filter(d=>d.date>d28&&d.training&&d.training.toLowerCase().includes('kraft')).length;
+    return{
+      dFat:avgFatNow!=null&&avgFatPrev!=null?round1(avgFatNow-avgFatPrev):null,
+      dMus:avgMusNow!=null&&avgMusPrev!=null?round1(avgMusNow-avgMusPrev):null,
+      avgProtein:avgProtein!=null?Math.round(avgProtein):null,
+      kraftCount
+    };
+  },[data]);
+
+  if(loading)return html`<div style=${{paddingBottom:110,minHeight:'100dvh'}}>
+    <div style=${{padding:'16px 18px 4px'}}><h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Dashboard</h1></div>
+    <div style=${{padding:'20px 18px',display:'flex',flexDirection:'column',gap:12}}>
+      <div class=skel style=${{height:80}}></div>
+      <div class=skel style=${{height:220}}></div>
+      <div class=skel style=${{height:180}}></div>
+    </div>
+  </div>`;
+
+  return html`<div style=${{paddingBottom:110}}>
+    <div style=${{padding:'16px 18px 4px'}}>
+      <h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Dashboard</h1>
+      <div style=${{fontSize:13,color:C.muted,marginTop:4}}>${data?.length||0} Datenpunkte</div>
+    </div>
+
+    <div style=${{padding:'12px 18px 0'}}>
+      <div style=${{display:'flex',background:'#ececea',borderRadius:11,padding:3,gap:2}}>
+        ${RANGES.map(r=>html`<div key=${r.key} onClick=${()=>setRange(r.key)} style=${{flex:1,padding:'8px 4px',fontSize:12,fontWeight:range===r.key?600:500,textAlign:'center',borderRadius:8,cursor:'pointer',background:range===r.key?'#fff':'transparent',color:range===r.key?C.text:C.muted,boxShadow:range===r.key?'0 1px 2px rgba(0,0,0,0.06)':'none',transition:'all 0.15s',userSelect:'none'}}>${r.label}</div>`)}
+      </div>
+    </div>
+
+    ${kpis?html`
+      <div style=${{padding:'14px 18px 0'}}>
+        <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+          <${KPICard} label="Δ Fettmasse" value=${kpis.dFat} unit="kg" color=${C.fettmasse} goodIfNegative=${true}/>
+          <${KPICard} label="Δ Muskelmasse" value=${kpis.dMus} unit="kg" color=${C.muskelmasse} goodIfNegative=${false}/>
+          <${KPICard} label="⌀ Protein" value=${kpis.avgProtein} unit="g" color=${C.protein} plain=${true}/>
+          <${KPICard} label="Kraft (28d)" value=${kpis.kraftCount} unit="×" color=${C.workout} plain=${true}/>
+        </div>
+      </div>
+    `:null}
+
+    <div style=${{padding:'0 18px'}}>
+      <${SectionLabel}>Körperkomposition<//>
+      <${ChartCanvas} id="bodycomp" data=${data} milestones=${milestones} renderer=${renderBodyCompChart}/>
+
+      <${SectionLabel}>Kalorien<//>
+      <${ChartCanvas} id="calories" data=${data} milestones=${milestones} renderer=${renderCaloriesChart}/>
+
+      <${SectionLabel}>Schritte<//>
+      <${ChartCanvas} id="steps" data=${data} milestones=${milestones} renderer=${renderStepsChart}/>
+
+      <${SectionLabel}>Training & Volumen<//>
+      <${ChartCanvas} id="tonnage" data=${data} milestones=${milestones} renderer=${renderTonnageChart}/>
+    </div>
+  </div>`;
+}
+
+function KPICard({label,value,unit,color,goodIfNegative,plain}){
+  const isNull=value==null;
+  let displayVal=isNull?'—':value;
+  let deltaColor=C.muted;
+  if(!isNull&&!plain){
+    const isGood=goodIfNegative?value<0:value>0;
+    const isNeutral=Math.abs(value)<0.05;
+    deltaColor=isNeutral?C.muted:(isGood?C.good:C.warnHigh);
+    displayVal=(value>0?'+':'')+(value<0?'−':'')+Math.abs(value).toFixed(1);
+    if(value<0)displayVal='−'+Math.abs(value).toFixed(1);
+  }
+  return html`<${Card} padding=${14}>
+    <div style=${{fontSize:11,fontWeight:600,color:C.muted,letterSpacing:0.3,textTransform:'uppercase',marginBottom:6,display:'flex',alignItems:'center',gap:6}}>
+      <div style=${{width:7,height:7,borderRadius:4,background:color}}></div>
+      ${label}
+    </div>
+    <div style=${{fontSize:22,fontWeight:700,fontVariantNumeric:'tabular-nums',color:plain?C.text:deltaColor}}>
+      ${displayVal}<span style=${{fontSize:13,fontWeight:500,color:C.muted}}> ${unit}</span>
+    </div>
+  <//>`;
+}
+
+/* Chart wrapper — loads Chart.js, renders canvas, handles lifecycle */
+function ChartCanvas({id,data,milestones,renderer}){
+  const canvasRef=useRef(null);
+  const chartRef=useRef(null);
+  const[ready,setReady]=useState(chartJsLoaded);
+
+  useEffect(()=>{
+    if(!chartJsLoaded)loadChartJs().then(()=>setReady(true));
+  },[]);
+
+  useEffect(()=>{
+    if(!ready||!canvasRef.current||!data?.length)return;
+    if(chartRef.current){chartRef.current.destroy();chartRef.current=null}
+    const ctx=canvasRef.current.getContext('2d');
+    chartRef.current=renderer(ctx,data,milestones);
+    return()=>{if(chartRef.current){chartRef.current.destroy();chartRef.current=null}};
+  },[ready,data,milestones]);
+
+  return html`<${Card} padding=${12} style=${{position:'relative'}}>
+    ${!ready?html`<div class=skel style=${{height:200}}></div>`:html`<canvas ref=${canvasRef} style=${{width:'100%',height:'auto'}}></canvas>`}
+  <//>`;
+}
+
+/* Milestone plugin for Chart.js */
+function milestonePlugin(milestones){
+  return{
+    id:'milestones',
+    afterDraw(chart){
+      if(!milestones?.length)return;
+      const{ctx,chartArea:{top,bottom},scales:{x}}=chart;
+      const labels=chart.data.labels;
+      for(const ms of milestones){
+        const idx=labels.indexOf(ms.date);
+        if(idx<0)continue;
+        const px=x.getPixelForValue(idx);
+        ctx.save();
+        ctx.strokeStyle='rgba(0,0,0,0.12)';
+        ctx.setLineDash([4,4]);
+        ctx.lineWidth=1;
+        ctx.beginPath();ctx.moveTo(px,top);ctx.lineTo(px,bottom);ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle='rgba(0,0,0,0.35)';
+        ctx.font='600 9px -apple-system, sans-serif';
+        ctx.textAlign='center';
+        ctx.fillText(ms.title.slice(0,16),px,top-4);
+        ctx.restore();
+      }
+    }
+  };
+}
+
+/* Date label formatter for x-axis */
+function fmtLabel(ds){const p=ds.split('-');return p[2]+'.'+p[1]+'.'}
+
+/* Rolling average helper */
+function rollingAvg(arr,window=7){
+  const result=[];
+  for(let i=0;i<arr.length;i++){
+    const start=Math.max(0,i-window+1);
+    const slice=arr.slice(start,i+1).filter(v=>v!=null);
+    result.push(slice.length?slice.reduce((a,b)=>a+b,0)/slice.length:null);
+  }
+  return result;
+}
+
+/* Chart configs */
+const chartDefaults={
+  responsive:true,
+  maintainAspectRatio:true,
+  aspectRatio:1.7,
+  animation:{duration:400},
+  plugins:{legend:{display:false},tooltip:{backgroundColor:'#1a1a1a',titleFont:{size:12,weight:'600'},bodyFont:{size:12},cornerRadius:10,padding:10,displayColors:false,callbacks:{title:(items)=>{const ds=items[0]?.label||'';const p=ds.split('.');return(p[0]||'')+'. '+(p[1]||'')+'.'}}}}
+};
+const scaleDefaults={x:{ticks:{maxRotation:0,autoSkip:true,maxTicksLimit:8,font:{size:10},color:'#aaa'},grid:{display:false}},y:{ticks:{font:{size:10},color:'#aaa'},grid:{color:'rgba(0,0,0,0.04)'},border:{display:false}}};
+
+function renderBodyCompChart(ctx,data,milestones){
+  const Chart=window._Chart;
+  const rows=data.filter(d=>d.fat_mass_kg!=null||d.muscle_mass_kg!=null);
+  if(!rows.length)return null;
+  const labels=rows.map(d=>d.date);
+  const fat=rows.map(d=>d.fat_mass_kg);
+  const mus=rows.map(d=>d.muscle_mass_kg);
+  const fatAvg=rollingAvg(fat);
+  const musAvg=rollingAvg(mus);
+  return new Chart(ctx,{
+    type:'line',
+    data:{labels:labels.map(fmtLabel),datasets:[
+      {label:'Fettmasse',data:fat,borderColor:C.fettmasse,backgroundColor:C.fettmasse+'30',pointRadius:2.5,pointBackgroundColor:C.fettmasse,borderWidth:1.5,tension:0.3,spanGaps:true},
+      {label:'Fett ⌀7d',data:fatAvg,borderColor:C.fettmasse,borderWidth:2.5,borderDash:[],pointRadius:0,tension:0.4,spanGaps:true},
+      {label:'Muskelmasse',data:mus,borderColor:C.muskelmasse,backgroundColor:C.muskelmasse+'30',pointRadius:2.5,pointBackgroundColor:C.muskelmasse,borderWidth:1.5,tension:0.3,spanGaps:true},
+      {label:'Muskel ⌀7d',data:musAvg,borderColor:C.muskelmasse,borderWidth:2.5,pointRadius:0,tension:0.4,spanGaps:true},
+    ]},
+    options:{...chartDefaults,plugins:{...chartDefaults.plugins,tooltip:{...chartDefaults.plugins.tooltip,callbacks:{...chartDefaults.plugins.tooltip.callbacks,label:(item)=>`${item.dataset.label}: ${item.raw?.toFixed(1)?.replace('.',',')} kg`}},legend:{display:true,position:'bottom',labels:{boxWidth:10,boxHeight:10,borderRadius:5,useBorderRadius:true,padding:12,font:{size:11},filter:(item)=>!item.text.includes('⌀7d')}}},scales:{...scaleDefaults}},
+    plugins:[milestonePlugin(milestones)]
+  });
+}
+
+function renderCaloriesChart(ctx,data,milestones){
+  const Chart=window._Chart;
+  const rows=data.filter(d=>d.kcal!=null||d.kcal_burned!=null);
+  if(!rows.length)return null;
+  const labels=rows.map(d=>d.date);
+  const eaten=rows.map(d=>d.kcal);
+  const burned=rows.map(d=>d.kcal_burned);
+  const eatenAvg=rollingAvg(eaten);
+  const burnedAvg=rollingAvg(burned);
+  return new Chart(ctx,{
+    type:'bar',
+    data:{labels:labels.map(fmtLabel),datasets:[
+      {label:'Gegessen',data:eaten,backgroundColor:'#F4D03F'+'90',borderRadius:3,barPercentage:0.7,order:2},
+      {label:'Verbrannt',data:burned,backgroundColor:'#E67E22'+'90',borderRadius:3,barPercentage:0.7,order:3},
+      {label:'Gegessen ⌀7d',data:eatenAvg,type:'line',borderColor:'#F4D03F',borderWidth:2,pointRadius:0,tension:0.4,spanGaps:true,order:1},
+      {label:'Verbrannt ⌀7d',data:burnedAvg,type:'line',borderColor:'#E67E22',borderWidth:2,pointRadius:0,tension:0.4,spanGaps:true,order:0},
+    ]},
+    options:{...chartDefaults,plugins:{...chartDefaults.plugins,legend:{display:true,position:'bottom',labels:{boxWidth:10,boxHeight:10,borderRadius:5,useBorderRadius:true,padding:12,font:{size:11},filter:(item)=>!item.text.includes('⌀7d')}}},scales:{...scaleDefaults,y:{...scaleDefaults.y,beginAtZero:false,ticks:{...scaleDefaults.y.ticks,callback:v=>v>=1000?(v/1000).toFixed(1)+'k':v}}}},
+    plugins:[milestonePlugin(milestones)]
+  });
+}
+
+function renderStepsChart(ctx,data,milestones){
+  const Chart=window._Chart;
+  const rows=data.filter(d=>d.steps!=null&&d.steps>0);
+  if(!rows.length)return null;
+  const labels=rows.map(d=>d.date);
+  const steps=rows.map(d=>d.steps);
+  const avg=rollingAvg(steps);
+  return new Chart(ctx,{
+    type:'bar',
+    data:{labels:labels.map(fmtLabel),datasets:[
+      {label:'Schritte',data:steps,backgroundColor:rows.map(d=>d.steps>=7500?C.good+'70':'#ddd'),borderRadius:3,barPercentage:0.7,order:1},
+      {label:'⌀ 7 Tage',data:avg,type:'line',borderColor:C.text,borderWidth:2,pointRadius:0,tension:0.4,spanGaps:true,order:0},
+    ]},
+    options:{...chartDefaults,aspectRatio:2,plugins:{...chartDefaults.plugins,legend:{display:false}},scales:{...scaleDefaults,y:{...scaleDefaults.y,beginAtZero:true,ticks:{...scaleDefaults.y.ticks,callback:v=>v>=1000?(v/1000).toFixed(0)+'k':v}}}},
+    plugins:[milestonePlugin(milestones),{
+      id:'goalLine',
+      afterDraw(chart){
+        const{ctx:c,chartArea:{left,right},scales:{y}}=chart;
+        const py=y.getPixelForValue(7500);
+        c.save();c.strokeStyle=C.good;c.lineWidth=1.5;c.setLineDash([6,4]);
+        c.beginPath();c.moveTo(left,py);c.lineTo(right,py);c.stroke();
+        c.setLineDash([]);c.fillStyle=C.good;c.font='600 9px -apple-system, sans-serif';c.textAlign='right';
+        c.fillText('7.500',right-2,py-5);c.restore();
+      }
+    }]
+  });
+}
+
+function renderTonnageChart(ctx,data,milestones){
+  const Chart=window._Chart;
+  const rows=data.filter(d=>d.training_volume_kg!=null&&d.training_volume_kg>0);
+  if(!rows.length)return null;
+  const labels=rows.map(d=>d.date);
+  const tons=rows.map(d=>Math.round(d.training_volume_kg/1000*10)/10);
+  const colors=rows.map(d=>{
+    if(!d.training)return C.muted;
+    const t=d.training.toLowerCase();
+    if(t.includes('hinge')||t.includes('pull'))return C.workout+'cc';
+    if(t.includes('squat')||t.includes('push'))return C.friday+'cc';
+    if(t.includes('heavy')||t.includes('compound'))return C.protein+'cc';
+    return C.muted+'aa';
+  });
+  return new Chart(ctx,{
+    type:'bar',
+    data:{labels:labels.map(fmtLabel),datasets:[
+      {label:'Tonnage',data:tons,backgroundColor:colors,borderRadius:4,barPercentage:0.65},
+    ]},
+    options:{...chartDefaults,aspectRatio:2,plugins:{...chartDefaults.plugins,legend:{display:false},tooltip:{...chartDefaults.plugins.tooltip,callbacks:{...chartDefaults.plugins.tooltip.callbacks,label:(item)=>{const row=rows[item.dataIndex];return[`${item.raw} t`,row?.training||''].filter(Boolean)}}}},scales:{...scaleDefaults,y:{...scaleDefaults.y,beginAtZero:true,ticks:{...scaleDefaults.y.ticks,callback:v=>v+'t'}}}},
+    plugins:[milestonePlugin(milestones)]
+  });
+}
+
+/* Placeholder (for Tabelle only) */
+function PlaceholderTab({id}){return html`<div style=${{paddingBottom:110,minHeight:'100dvh'}}><div style=${{padding:'60px 20px',textAlign:'center'}}><div style=${{fontSize:48,marginBottom:16}}>📋</div><h2 style=${{fontSize:22,fontWeight:700,marginBottom:8}}>Tabelle</h2><div style=${{fontSize:14,color:C.muted}}>Kommt in Phase 3b</div><div style=${{fontSize:13,color:C.muted,marginTop:8}}>Sheet-Layout mit allen Daten</div></div></div>`}
 
 /* Settings */
 function SettingsTab({user,onBack}){
