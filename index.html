@@ -711,20 +711,29 @@ async function loadChartJs(){
   chartJsLoaded=true;
 }
 
-const RANGES=[{key:'1w',label:'1 Wo',days:7},{key:'4w',label:'4 Wo',days:28},{key:'8w',label:'8 Wo',days:56},{key:'3m',label:'3 Mo',days:91},{key:'all',label:'Alles',days:9999}];
-const PERIOD_SHORT={'1w':'1 Wo.','4w':'4 Wo.','8w':'8 Wo.','3m':'3 Mo.','all':'gesamt'};
+const RANGES=[{key:'1w',label:'1 Wo',days:7},{key:'4w',label:'4 Wo',days:28},{key:'8w',label:'8 Wo',days:56},{key:'3m',label:'3 Mo',days:91},{key:'custom',label:'⋯',days:0}];
+const PERIOD_SHORT={'1w':'1 Wo.','4w':'4 Wo.','8w':'8 Wo.','3m':'3 Mo.','custom':''};
 
 function DashboardTab({user}){
   const[range,setRange]=useState('8w');
   const[data,setData]=useState(null);
   const[milestones,setMilestones]=useState([]);
   const[loading,setLoading]=useState(true);
+  const[customFrom,setCustomFrom]=useState(()=>addDays(localDate(),-90));
+  const[customTo,setCustomTo]=useState(localDate());
+  const[showCustom,setShowCustom]=useState(false);
+
+  const handleRangeChange=(key)=>{
+    if(key==='custom'){setShowCustom(true)}
+    else{setRange(key);setShowCustom(false)}
+  };
+  const applyCustom=()=>{setRange('custom');setShowCustom(false)};
 
   useEffect(()=>{
     setLoading(true);
-    const r=RANGES.find(r=>r.key===range);
-    const endDate=localDate();
-    const startDate=r.days>9000?'2020-01-01':addDays(endDate,-r.days);
+    let startDate,endDate=localDate();
+    if(range==='custom'){startDate=customFrom;endDate=customTo}
+    else{const r=RANGES.find(r=>r.key===range);startDate=addDays(endDate,-r.days)}
     Promise.all([
       sb.from('daily_tracking').select('date,weight_kg,body_fat_pct,muscle_pct,fat_mass_kg,muscle_mass_kg,kcal,protein_g,carbs_g,fat_g,kcal_burned,steps,training,training_volume_kg,plan_version,cycle_day,day_type').eq('user_id',user.id).gte('date',startDate).lte('date',endDate).order('date'),
       sb.from('milestones').select('date,category,title').eq('user_id',user.id).gte('date',startDate).lte('date',endDate).order('date')
@@ -733,23 +742,31 @@ function DashboardTab({user}){
       setMilestones(ms||[]);
       setLoading(false);
     });
-  },[user.id,range]);
+  },[user.id,range,customFrom,customTo]);
 
-  // KPIs — simple delta: last value minus first value in period
+  // KPIs — 3-day average at start vs end for stability (single points are noisy)
   const kpis=useMemo(()=>{
     if(!data||!data.length)return null;
     const avg=(arr,key)=>{const vals=arr.filter(d=>d[key]!=null).map(d=>d[key]);return vals.length?vals.reduce((a,b)=>a+b,0)/vals.length:null};
-    // Find first and last non-null values for fat and muscle
-    const fatRows=data.filter(d=>d.fat_mass_kg!=null);
-    const musRows=data.filter(d=>d.muscle_mass_kg!=null);
-    const dFat=fatRows.length>=2?round1(fatRows[fatRows.length-1].fat_mass_kg-fatRows[0].fat_mass_kg):null;
-    const dMus=musRows.length>=2?round1(musRows[musRows.length-1].muscle_mass_kg-musRows[0].muscle_mass_kg):null;
+    // 3-day avg at start vs 3-day avg at end
+    const edgeAvg=(rows,key,fromEnd)=>{
+      const vals=rows.filter(d=>d[key]!=null);
+      if(vals.length<2)return null;
+      const slice=fromEnd?vals.slice(-Math.min(3,vals.length)):vals.slice(0,Math.min(3,vals.length));
+      return slice.reduce((s,d)=>s+d[key],0)/slice.length;
+    };
+    const fatStart=edgeAvg(data,'fat_mass_kg',false);
+    const fatEnd=edgeAvg(data,'fat_mass_kg',true);
+    const musStart=edgeAvg(data,'muscle_mass_kg',false);
+    const musEnd=edgeAvg(data,'muscle_mass_kg',true);
+    const dFat=fatStart!=null&&fatEnd!=null?fatEnd-fatStart:null;
+    const dMus=musStart!=null&&musEnd!=null?musEnd-musStart:null;
     const avgProtein=avg(data,'protein_g');
     const kraftCount=data.filter(d=>d.training&&/v\d|FH/.test(d.training)).length;
     return{dFat,dMus,avgProtein:avgProtein!=null?Math.round(avgProtein):null,kraftCount};
   },[data]);
 
-  const ps=PERIOD_SHORT[range]||'';
+  const ps=range==='custom'?fmtDateFull(customFrom).full.split(' ').slice(0,2).join(' ')+' – '+fmtDateFull(customTo).full.split(' ').slice(0,2).join(' '):(PERIOD_SHORT[range]||'');
 
   if(loading)return html`<div style=${{paddingBottom:110,minHeight:'100dvh'}}>
     <div style=${{padding:'16px 18px 4px'}}><h1 style=${{fontSize:28,fontWeight:700,letterSpacing:'-0.5px'}}>Dashboard</h1></div>
@@ -768,9 +785,12 @@ function DashboardTab({user}){
     <div style=${{padding:'0 18px'}}>
       <div style=${{marginTop:14}}>
         <div style=${{display:'flex',background:'#ececea',borderRadius:11,padding:3,gap:2}}>
-          ${RANGES.map(r=>html`<div key=${r.key} onClick=${()=>setRange(r.key)} style=${{flex:1,padding:'8px 4px',fontSize:12,fontWeight:range===r.key?600:500,textAlign:'center',borderRadius:8,cursor:'pointer',background:range===r.key?'#fff':'transparent',color:range===r.key?C.text:C.muted,boxShadow:range===r.key?'0 1px 2px rgba(0,0,0,0.06)':'none',transition:'all 0.15s',userSelect:'none'}}>${r.label}</div>`)}
+          ${RANGES.map(r=>html`<div key=${r.key} onClick=${()=>handleRangeChange(r.key)} style=${{flex:r.key==='custom'?0.6:1,padding:'8px 4px',fontSize:12,fontWeight:range===r.key?600:500,textAlign:'center',borderRadius:8,cursor:'pointer',background:range===r.key?'#fff':'transparent',color:range===r.key?C.text:C.muted,boxShadow:range===r.key?'0 1px 2px rgba(0,0,0,0.06)':'none',transition:'all 0.15s',userSelect:'none'}}>${r.label}</div>`)}
         </div>
+        ${range==='custom'?html`<div style=${{fontSize:11,color:C.muted,textAlign:'center',marginTop:6,cursor:'pointer'}} onClick=${()=>setShowCustom(true)}>${ps} ✎</div>`:null}
       </div>
+
+      ${showCustom?html`<${CustomRangeOverlay} from=${customFrom} to=${customTo} onApply=${(f,t)=>{setCustomFrom(f);setCustomTo(t);applyCustom()}} onClose=${()=>setShowCustom(false)}/>`:null}
 
       ${kpis?html`
         <div style=${{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:14}}>
@@ -790,9 +810,9 @@ function DashboardTab({user}){
       <${SectionLabel} right="Ziel 7.500">Schritte<//>
       <${ChartCanvas} id="steps" data=${data} milestones=${milestones} renderer=${renderStepsChart} height=${120}/>
 
-      <${SectionLabel} right=${html`<span style=${{display:'inline-flex',gap:10}}><${LegendDot} c=${C.muskelmasse} label="Kraft"/><${LegendDot} c=${C.rest} label="CnS"/></span>`}>Trainings-Kalender<//>
+      <${SectionLabel} right=${html`<span style=${{display:'inline-flex',gap:8}}><${LegendDot} c=${'#A42059'} label="H+P"/><${LegendDot} c=${'#623c6d'} label="S+P"/><${LegendDot} c=${'#205781'} label="Comp"/><${LegendDot} c=${C.rest} label="CnS"/></span>`}>Trainings-Kalender<//>
       <${Card} padding=${14}>
-        <${TrainingCalendar} data=${data}/>
+        <${TrainingCalendar} user=${user}/>
       <//>
 
       <${SectionLabel} right=${html`<span style=${{display:'inline-flex',gap:10}}><${LegendDot} c=${'#A42059'} label="Hinge+Pull"/><${LegendDot} c=${'#623c6d'} label="Squat+Push"/><${LegendDot} c=${'#205781'} label="Compounds"/></span>`}>Trainings-Volumen<//>
@@ -1032,15 +1052,44 @@ const PLAN_KRAFT=[1,4,6];
 const PLAN_CNS=[3];
 const DOW_LABELS=['Mo','Di','Mi','Do','Fr','Sa','So'];
 
-function TrainingCalendar({data}){
+// Workout type colors
+const WT_COLORS={hp:'#A42059',sp:'#623c6d',co:'#205781'};
+function workoutType(training){
+  const t=(training||'').toLowerCase();
+  if(t.includes('hinge')||t.includes('pull'))return'hp';
+  if(t.includes('squat')||t.includes('push'))return'sp';
+  if(t.includes('heavy')||t.includes('compound')||t.includes('full'))return'co';
+  return'hp'; // fallback
+}
+function kraftColor(training){return WT_COLORS[workoutType(training)]||C.muskelmasse}
+
+function TrainingCalendar({user}){
   const[monthOffset,setMonthOffset]=useState(0);
+  const[monthData,setMonthData]=useState([]);
   const today=parseDateLocal(localDate());
   const view=new Date(today.getFullYear(),today.getMonth()+monthOffset,1);
   const monthName=view.toLocaleDateString('de-DE',{month:'long',year:'numeric'});
 
+  // Fetch data for the displayed month (+ padding for prev/next month days in grid)
+  useEffect(()=>{
+    const firstDay=new Date(view);
+    const firstDow=(firstDay.getDay()+6)%7;
+    const gridStart=new Date(firstDay);
+    gridStart.setDate(firstDay.getDate()-firstDow);
+    const lastDay=new Date(view.getFullYear(),view.getMonth()+1,0);
+    const lastDow=(lastDay.getDay()+6)%7;
+    const gridEnd=new Date(lastDay);
+    gridEnd.setDate(lastDay.getDate()+(6-lastDow));
+    const startDate=localDate(gridStart);
+    const endDate=localDate(gridEnd);
+    sb.from('daily_tracking').select('date,training,training_volume_kg,plan_version')
+      .eq('user_id',user.id).gte('date',startDate).lte('date',endDate)
+      .then(({data})=>setMonthData(data||[]));
+  },[user.id,monthOffset]);
+
   // Build calendar grid (Mo-anchored)
   const firstDay=new Date(view);
-  const firstDow=(firstDay.getDay()+6)%7; // Mon=0
+  const firstDow=(firstDay.getDay()+6)%7;
   const gridStart=new Date(firstDay);
   gridStart.setDate(firstDay.getDate()-firstDow);
   const lastDay=new Date(view.getFullYear(),view.getMonth()+1,0);
@@ -1049,8 +1098,7 @@ function TrainingCalendar({data}){
   gridEnd.setDate(lastDay.getDate()+(6-lastDow));
   const totalDays=Math.round((gridEnd-gridStart)/86400000)+1;
 
-  // Map data by date
-  const byDate=new Map((data||[]).map(r=>[r.date,r]));
+  const byDate=new Map(monthData.map(r=>[r.date,r]));
 
   const weeks=[];
   for(let w=0;w<totalDays/7;w++){
@@ -1068,7 +1116,6 @@ function TrainingCalendar({data}){
     weeks.push(week);
   }
 
-  // Counts for displayed month
   let kraftDone=0,cnsDone=0,kraftPlanned=0,cnsPlanned=0;
   weeks.flat().forEach(c=>{
     if(!c.inMonth)return;
@@ -1077,8 +1124,8 @@ function TrainingCalendar({data}){
     if(PLAN_CNS.includes(realDow))cnsPlanned++;
     if(c.row){
       const t=c.row.training||'';
-      if(/v\d|FH/.test(t))kraftDone++;
-      if(/CnS/.test(t))cnsDone++;
+      if(/v\d|FH|Kraft|Hinge|Squat|Heavy|Compound|Full/i.test(t))kraftDone++;
+      if(/CnS/i.test(t))cnsDone++;
     }
   });
 
@@ -1104,16 +1151,17 @@ function TrainingCalendar({data}){
           const planK=PLAN_KRAFT.includes(realDow);
           const planCns=PLAN_CNS.includes(realDow);
           const t=(cell.row?.training||'');
-          const didK=/v\d|FH/.test(t);
-          const didC=/CnS/.test(t);
+          const isKraft=/v\d|FH|Kraft|Hinge|Squat|Heavy|Compound|Full/i.test(t);
+          const isCnS=/CnS/i.test(t);
+          const kColor=isKraft?kraftColor(t):C.muskelmasse;
           const dim=!cell.inMonth;
           return html`<div key=${di} style=${{aspectRatio:'1',position:'relative',borderRadius:8,background:dim?'transparent':'#fafaf8',border:cell.isToday?'1.5px solid '+C.text:'1px solid '+(dim?'transparent':C.border),opacity:dim?.35:1,display:'flex',flexDirection:'column',padding:4,overflow:'hidden'}}>
             <div style=${{fontSize:10,fontWeight:600,color:C.muted,fontVariantNumeric:'tabular-nums',lineHeight:1,textAlign:'right'}}>${cell.date.getDate()}</div>
             <div style=${{flex:1,display:'flex',alignItems:'flex-end',justifyContent:'center',gap:2,paddingBottom:2}}>
-              ${planK?html`<${CalPill} color=${C.muskelmasse} done=${didK} future=${cell.isFuture} label="K"/>`:null}
-              ${planCns?html`<${CalPill} color=${C.rest} done=${didC} future=${cell.isFuture} label="C"/>`:null}
-              ${!planK&&didK?html`<${CalPill} color=${C.muskelmasse} done=${true} extra=${true} label="K"/>`:null}
-              ${!planCns&&didC?html`<${CalPill} color=${C.rest} done=${true} extra=${true} label="C"/>`:null}
+              ${planK?html`<${CalPill} color=${isKraft?kColor:C.muskelmasse} done=${isKraft} future=${cell.isFuture} label="K"/>`:null}
+              ${planCns?html`<${CalPill} color=${C.rest} done=${isCnS} future=${cell.isFuture} label="C"/>`:null}
+              ${!planK&&isKraft?html`<${CalPill} color=${kColor} done=${true} extra=${true} label="K"/>`:null}
+              ${!planCns&&isCnS?html`<${CalPill} color=${C.rest} done=${true} extra=${true} label="C"/>`:null}
             </div>
           </div>`;
         })}
@@ -1125,6 +1173,34 @@ function TrainingCalendar({data}){
       <${CountBlock} color=${C.rest} label="CnS" done=${cnsDone} planned=${cnsPlanned}/>
     </div>
     <div style=${{fontSize:10,color:C.muted,marginTop:8,textAlign:'center'}}>Plan: Kraft Mo/Do/Sa · CnS Mi</div>
+  </div>`;
+}
+
+/* Custom date range overlay */
+function CustomRangeOverlay({from,to,onApply,onClose}){
+  const[f,setF]=useState(from);
+  const[t,setT]=useState(to);
+  return html`<div style=${{position:'fixed',inset:0,zIndex:200,display:'flex',alignItems:'center',justifyContent:'center',padding:20}} onClick=${onClose}>
+    <div style=${{position:'absolute',inset:0,background:'rgba(0,0,0,0.3)',backdropFilter:'blur(4px)',WebkitBackdropFilter:'blur(4px)'}}></div>
+    <div style=${{position:'relative',background:C.card,borderRadius:22,padding:24,width:'100%',maxWidth:340,boxShadow:'0 8px 32px rgba(0,0,0,0.12)'}} onClick=${e=>e.stopPropagation()}>
+      <div style=${{fontSize:17,fontWeight:700,marginBottom:16}}>Zeitraum wählen</div>
+      <div style=${{display:'flex',flexDirection:'column',gap:12}}>
+        <label style=${{display:'block'}}>
+          <div style=${{fontSize:13,fontWeight:600,color:C.muted,marginBottom:6}}>Von</div>
+          <input type=date value=${f} onChange=${e=>setF(e.target.value)}
+            style=${{width:'100%',height:44,background:'#fafaf8',border:'1px solid '+C.border,borderRadius:12,padding:'0 12px',fontSize:15,color:C.text}}/>
+        </label>
+        <label style=${{display:'block'}}>
+          <div style=${{fontSize:13,fontWeight:600,color:C.muted,marginBottom:6}}>Bis</div>
+          <input type=date value=${t} onChange=${e=>setT(e.target.value)} max=${localDate()}
+            style=${{width:'100%',height:44,background:'#fafaf8',border:'1px solid '+C.border,borderRadius:12,padding:'0 12px',fontSize:15,color:C.text}}/>
+        </label>
+      </div>
+      <div style=${{display:'flex',gap:8,marginTop:18}}>
+        <button onClick=${onClose} style=${{flex:1,height:44,borderRadius:12,border:'1px solid '+C.border,background:C.card,fontSize:14,fontWeight:600,color:C.muted,cursor:'pointer'}}>Abbrechen</button>
+        <button onClick=${()=>onApply(f,t)} style=${{flex:1,height:44,borderRadius:12,border:'none',background:C.text,fontSize:14,fontWeight:600,color:'#fff',cursor:'pointer'}}>Anwenden</button>
+      </div>
+    </div>
   </div>`;
 }
 
