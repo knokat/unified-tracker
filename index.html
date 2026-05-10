@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#f4f4f2">
 <title>Unified Tracker</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -133,8 +136,11 @@ function HeuteTab({user,toast}){
 
   useEffect(()=>{
     setLoading(true);setSaved(false);
-    const weekStart=addDays(selDate,-6);
-    Promise.all([dbGetDay(user.id,selDate),dbGetPrevDay(user.id,selDate),dbGetWeek(user.id,weekStart,selDate)]).then(([d,p,w])=>{
+    // Week: Sa-Fr containing selDate
+    const selD=parseDateLocal(selDate);const dow=selD.getDay();
+    const satOff=dow===6?0:-(dow+1); // offset to previous Saturday
+    const wkStart=addDays(selDate,satOff);const wkEnd=addDays(wkStart,6);
+    Promise.all([dbGetDay(user.id,selDate),dbGetPrevDay(user.id,selDate),dbGetWeek(user.id,wkStart,wkEnd)]).then(([d,p,w])=>{
       setDayData(d);setPrevData(p);setWeekData(w);
       if(d){setWKg(d.weight_kg!=null?d.weight_kg:null);setFatP(d.body_fat_pct!=null?d.body_fat_pct:null);setMusP(d.muscle_pct!=null?d.muscle_pct:null);setNotes(d.notes||'');setDayType(d.day_type||null);if(d.weight_kg!=null)setSaved(true)}
       else{setWKg(null);setFatP(null);setMusP(null);setNotes('');setDayType(null)}
@@ -163,7 +169,10 @@ function HeuteTab({user,toast}){
   const dMus=saved&&prevData?.muscle_mass_kg!=null&&dayData?.muscle_mass_kg!=null?round1(dayData.muscle_mass_kg-prevData.muscle_mass_kg):null;
 
   const weekDays=useMemo(()=>{
-    const days=[];for(let i=6;i>=0;i--){const ds=addDays(selDate,-i);const d=parseDateLocal(ds);const wd=['So','Mo','Di','Mi','Do','Fr','Sa'][d.getDay()];const dom=d.getDate();const row=weekData.find(w=>w.date===ds);days.push({ds,wd,dom,dayType:row?.day_type,hasWeight:row?.weight_kg!=null,isSel:ds===selDate})}return days;
+    // Sa-Fr week containing selDate
+    const selD=parseDateLocal(selDate);const dow=selD.getDay();
+    const satOff=dow===6?0:-(dow+1);const wkStart=addDays(selDate,satOff);
+    const days=[];for(let i=0;i<7;i++){const ds=addDays(wkStart,i);const d=parseDateLocal(ds);const wd=['So','Mo','Di','Mi','Do','Fr','Sa'][d.getDay()];const dom=d.getDate();const row=weekData.find(w=>w.date===ds);const future=ds>localDate();days.push({ds,wd,dom,dayType:row?.day_type,hasWeight:row?.weight_kg!=null,isSel:ds===selDate,isToday:ds===localDate(),future})}return days;
   },[selDate,weekData]);
 
   return html`<div style=${{paddingBottom:110}}>
