@@ -329,63 +329,6 @@ function parseTonnage(csv){
   return results;
 }
 
-function parseSheetCSV(csv){
-  // Google Sheet CSV: Datum col[2] = "Fr., 09.01.2026", kcal col[3] = "1.902", Fett col[6], KH col[7], Protein col[8]
-  // German number format: 1.902 = 1902, commas for decimals
-  const lines=csv.replace(/\r\n/g,'\n').replace(/\r/g,'\n').trim().split('\n');
-  // Parse with simple CSV logic (handle quoted fields with newlines)
-  const results=[];
-  let i=0;
-  // Skip header (first line containing "Datum")
-  while(i<lines.length&&!lines[i].includes('Datum'))i++;
-  if(i<lines.length)i++; // skip header line
-  
-  // Rejoin lines for proper CSV parsing (some fields have embedded newlines)
-  const body=lines.slice(i).join('\n');
-  // Simple CSV row parser
-  const parseRow=(text)=>{
-    const fields=[];let field='';let inQ=false;
-    for(let j=0;j<text.length;j++){
-      const ch=text[j];
-      if(inQ){
-        if(ch==='"'&&text[j+1]==='"'){field+='"';j++}
-        else if(ch==='"')inQ=false;
-        else field+=ch;
-      }else{
-        if(ch==='"')inQ=true;
-        else if(ch===','){fields.push(field);field=''}
-        else if(ch==='\n'&&!inQ){fields.push(field);return{fields,consumed:j+1}}
-        else field+=ch;
-      }
-    }
-    fields.push(field);
-    return{fields,consumed:text.length};
-  };
-  
-  let pos=0;
-  while(pos<body.length){
-    const{fields,consumed}=parseRow(body.slice(pos));
-    pos+=consumed;
-    if(fields.length<9)continue;
-    // Parse date from col[2]: "Fr., 09.01.2026"
-    const dtMatch=(fields[2]||'').match(/(\d{2})\.(\d{2})\.(\d{4})/);
-    if(!dtMatch)continue;
-    const[,dd,mm,yyyy]=dtMatch;
-    const date=`${yyyy}-${mm}-${dd}`;
-    // Only import up to 2026-05-03 (fddb takes over from 2026-05-04)
-    if(date>='2026-05-04')continue;
-    // Parse kcal: "1.902" → 1902 (German thousands separator)
-    const parseDE=(s)=>{const v=(s||'').trim().replace(/\./g,'').replace(',','.');const n=parseFloat(v);return isNaN(n)?null:Math.round(n)};
-    const kcal=parseDE(fields[3]);
-    if(!kcal||kcal<800)continue; // skip empty/invalid rows
-    const fat=parseDE(fields[6]);
-    const carbs=parseDE(fields[7]);
-    const protein=parseDE(fields[8]);
-    results.push({date,kcal,protein_g:protein,carbs_g:carbs,fat_g:fat});
-  }
-  return results.sort((a,b)=>a.date.localeCompare(b.date));
-}
-
 // Plan version from date (for Garmin activities)
 function planFromDate(date){
   if(date<'2026-03-01')return'FH';if(date<'2026-04-01')return'v1';if(date<'2026-04-05')return'v2';
@@ -565,7 +508,6 @@ function ImportTab({user,toast}){
   const[garminStatus,setGarminStatus]=useState(null);
   const fileRef=useRef(null);
   const fddbRef=useRef(null);
-  const sheetRef=useRef(null);
 
   // Load cutoff from localStorage
   const getCutoff=()=>{try{return localStorage.getItem('ut_cutoff')||DEFAULT_CUTOFF}catch(e){return DEFAULT_CUTOFF}};
@@ -595,26 +537,6 @@ function ImportTab({user,toast}){
     }catch(e){console.error(e);toast('Fehler: '+e.message)}
     setImporting(false);
     if(fddbRef.current)fddbRef.current.value='';
-  };
-
-  // --- Google Sheet CSV upload (historical data, up to 2026-05-03) ---
-  const handleSheetFile=async(e)=>{
-    const file=e.target.files?.[0];if(!file)return;
-    setImporting(true);setFeedback(null);
-    try{
-      const text=await file.text();
-      let days=parseSheetCSV(text);
-      days=filterCutoff(days);
-      if(!days.length){toast('Keine gültigen Tage gefunden');setImporting(false);return}
-      const result=await importFddb(user.id,days); // same upsert logic
-      await logImport(user.id,'sheet',days,file.name);
-      const dates=days.map(d=>d.date).sort();
-      setFeedback({source:'sheet',msg:`${days.length} Tage importiert — ${result.updated} aktualisiert, ${result.created} neu.`,range:fmtRange(dates[0],dates[dates.length-1])});
-      const{data:newLogs}=await sb.from('import_log').select('*').eq('user_id',user.id).order('imported_at',{ascending:false}).limit(10);
-      setLogs(newLogs||[]);
-    }catch(e){console.error(e);toast('Fehler: '+e.message)}
-    setImporting(false);
-    if(sheetRef.current)sheetRef.current.value='';
   };
 
   // --- Garmin ZIP upload ---
@@ -712,24 +634,12 @@ function ImportTab({user,toast}){
           <div style=${{width:44,height:44,borderRadius:12,background:'#f4f4f2',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>🍎</div>
           <div style=${{flex:1,minWidth:0}}>
             <div style=${{fontSize:15,fontWeight:600}}>fddb CSV importieren</div>
-            <div style=${{fontSize:11,color:C.muted,marginTop:2}}>Ab 04.05.2026 · fddb Tagebuch → Datei → Exportieren</div>
+            <div style=${{fontSize:11,color:C.muted,marginTop:2}}>fddb Tagebuch → Datei → Exportieren</div>
           </div>
           <div style=${{fontSize:13,color:C.muted}}>📄</div>
         </div>
         <input ref=${fddbRef} type=file accept=".csv,.txt" onChange=${handleFddbFile} style=${{display:'none'}}/>
         ${feedback?.source==='fddb'?html`<div style=${{padding:'0 14px 14px'}}><div style=${{padding:12,background:'rgba(31,122,77,0.08)',border:'1px solid rgba(31,122,77,0.20)',borderRadius:10,fontSize:13,color:C.good,fontWeight:600}}>✓ ${feedback.msg}<br/><span style=${{fontWeight:500,color:C.muted,fontSize:11}}>${feedback.range}</span></div></div>`:null}
-      <//>
-      <${Card} padding=${0} style=${{marginTop:8}}>
-        <div onClick=${()=>!importing&&sheetRef.current?.click()} style=${{display:'flex',alignItems:'center',gap:14,padding:14,cursor:'pointer'}}>
-          <div style=${{width:44,height:44,borderRadius:12,background:'#f4f4f2',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>📊</div>
-          <div style=${{flex:1,minWidth:0}}>
-            <div style=${{fontSize:15,fontWeight:600}}>Google Sheet CSV importieren</div>
-            <div style=${{fontSize:11,color:C.muted,marginTop:2}}>Historische Daten bis 03.05.2026</div>
-          </div>
-          <div style=${{fontSize:13,color:C.muted}}>📄</div>
-        </div>
-        <input ref=${sheetRef} type=file accept=".csv" onChange=${handleSheetFile} style=${{display:'none'}}/>
-        ${feedback?.source==='sheet'?html`<div style=${{padding:'0 14px 14px'}}><div style=${{padding:12,background:'rgba(31,122,77,0.08)',border:'1px solid rgba(31,122,77,0.20)',borderRadius:10,fontSize:13,color:C.good,fontWeight:600}}>✓ ${feedback.msg}<br/><span style=${{fontWeight:500,color:C.muted,fontSize:11}}>${feedback.range}</span></div></div>`:null}
       <//>
 
       <!-- Garmin -->
