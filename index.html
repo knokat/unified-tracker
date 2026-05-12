@@ -137,6 +137,9 @@ function HeuteTab({user,toast,onSettings}){
   const[saved,setSaved]=useState(false);const[saving,setSaving]=useState(false);
   const notesTimer=useRef(null);
 
+  // Default day type based on weekday: Mo=1,Mi=3,Do=4,Sa=6 → workout, Fr=5 → friday, rest otherwise
+  const defaultDayType=(dateStr)=>{const dow=parseDateLocal(dateStr).getDay();if(dow===1||dow===3||dow===4||dow===6)return'workout';if(dow===5)return'friday';return'rest'};
+
   useEffect(()=>{
     setLoading(true);setSaved(false);
     // Week: Sa-Fr containing selDate
@@ -145,8 +148,10 @@ function HeuteTab({user,toast,onSettings}){
     const wkStart=addDays(selDate,satOff);const wkEnd=addDays(wkStart,6);
     Promise.all([dbGetDay(user.id,selDate),dbGetPrevDay(user.id,selDate),dbGetWeek(user.id,wkStart,wkEnd)]).then(([d,p,w])=>{
       setDayData(d);setPrevData(p);setWeekData(w);
-      if(d){setWKg(d.weight_kg!=null?d.weight_kg:null);setFatP(d.body_fat_pct!=null?d.body_fat_pct:null);setMusP(d.muscle_pct!=null?d.muscle_pct:null);setNotes(d.notes||'');setDayType(d.day_type||null);if(d.weight_kg!=null)setSaved(true)}
-      else{setWKg(null);setFatP(null);setMusP(null);setNotes('');setDayType(null)}
+      if(d){setWKg(d.weight_kg!=null?d.weight_kg:null);setFatP(d.body_fat_pct!=null?d.body_fat_pct:null);setMusP(d.muscle_pct!=null?d.muscle_pct:null);setNotes(d.notes||'');
+        if(d.day_type){setDayType(d.day_type)}else{const def=defaultDayType(selDate);setDayType(def);dbUpsertDayType(user.id,selDate,def)}
+        if(d.weight_kg!=null)setSaved(true)}
+      else{setWKg(null);setFatP(null);setMusP(null);setNotes('');const def=defaultDayType(selDate);setDayType(def);dbUpsertDayType(user.id,selDate,def)}
       setLoading(false);
     });
   },[user.id,selDate]);
@@ -176,7 +181,7 @@ function HeuteTab({user,toast,onSettings}){
     // Sa-Fr week containing selDate
     const selD=parseDateLocal(selDate);const dow=selD.getDay();
     const satOff=dow===6?0:-(dow+1);const wkStart=addDays(selDate,satOff);
-    const days=[];for(let i=0;i<7;i++){const ds=addDays(wkStart,i);const d=parseDateLocal(ds);const wd=['So','Mo','Di','Mi','Do','Fr','Sa'][d.getDay()];const dom=d.getDate();const row=weekData.find(w=>w.date===ds);const future=ds>localDate();days.push({ds,wd,dom,dayType:row?.day_type,hasWeight:row?.weight_kg!=null,isSel:ds===selDate,isToday:ds===localDate(),future})}return days;
+    const days=[];for(let i=0;i<7;i++){const ds=addDays(wkStart,i);const d=parseDateLocal(ds);const wd=['So','Mo','Di','Mi','Do','Fr','Sa'][d.getDay()];const dom=d.getDate();const row=weekData.find(w=>w.date===ds);const future=ds>localDate();const dt=row?.day_type||defaultDayType(ds);days.push({ds,wd,dom,dayType:dt,hasWeight:row?.weight_kg!=null,isSel:ds===selDate,isToday:ds===localDate(),future})}return days;
   },[selDate,weekData]);
 
   return html`<div style=${{paddingBottom:110}}>
