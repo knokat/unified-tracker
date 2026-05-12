@@ -230,10 +230,10 @@ function HeuteTab({user,toast,onSettings}){
       ${dayData?.kcal?html`
         <${SectionLabel} right=${dayData.kcal+' kcal'}>Ernährung<//>
         <${Card}>
-          <${MacroBar} label="Kalorien" current=${dayData.kcal} target=${2450} color=${C.kcal}/>
-          <${MacroBar} label="Protein" current=${dayData.protein_g} target=${152} color=${C.protein}/>
-          <${MacroBar} label="Carbs" current=${dayData.carbs_g} target=${296} color=${C.carbs}/>
-          <${MacroBar} label="Fett" current=${dayData.fat_g} target=${73} color=${C.fat}/>
+          <${MacroBar} label="Kalorien" current=${dayData.kcal} target=${dayType==='workout'?2200:dayType==='friday'?2200:1900} color=${C.kcal}/>
+          <${MacroBar} label="Protein" current=${dayData.protein_g} target=${dayType==='workout'?152:dayType==='friday'?120:125} color=${C.protein}/>
+          <${MacroBar} label="Carbs" current=${dayData.carbs_g} target=${dayType==='workout'?260:dayType==='friday'?250:200} color=${C.carbs}/>
+          <${MacroBar} label="Fett" current=${dayData.fat_g} target=${dayType==='workout'?73:dayType==='friday'?80:72} color=${C.fat}/>
         <//>`:null}
 
       ${dayData?.training?html`
@@ -333,12 +333,13 @@ function parseTonnage(csv){
 // Plan version from date (for Garmin activities)
 function planFromDate(date){
   if(date<'2026-03-01')return'FH';if(date<'2026-04-01')return'v1';if(date<'2026-04-05')return'v2';
-  if(date<'2026-04-14')return'v3';if(date<'2026-04-24')return'v4';if(date<'2026-04-27')return'v5';return'v6';
+  if(date<'2026-04-14')return'v3';if(date<'2026-04-24')return'v4';if(date<'2026-04-27')return'v5';if(date<'2026-05-12')return'v6';return'v7';
 }
 // Workout name from day number + plan version
 function workoutName(day,plan){
   if(plan==='FH')return'Foundations';
   if(plan==='v1')return['Lower Body','Upper Body','Full Body'][day-1]||'Training';
+  if(plan==='v7')return['Stability + Pull','Squat + Push','Gym Compounds'][day-1]||'Training';
   const names=['Hinge + Pull','Squat + Push',plan==='v6'?'Heavy Compounds + Shoulders':'Heavy Compounds + Rehab'];
   return names[day-1]||'Training';
 }
