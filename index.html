@@ -826,15 +826,17 @@ function DashboardTab({user}){
       <${ChartCanvas} id="tonnage" data=${data} milestones=${milestones} renderer=${renderTonnageChart} height=${130}/>
 
       ${milestones.length?html`
-        <${SectionLabel}>Milestones im Zeitraum<//>
+        <${SectionLabel}>Milestones im Zeitraum (${milestones.length})<//>
         <${Card} padding=${0}>
-          ${milestones.slice().reverse().slice(0,6).map((m,i,arr)=>html`<div key=${m.date+m.title} style=${{display:'flex',alignItems:'flex-start',gap:12,padding:'12px 14px',borderBottom:i===arr.length-1?'none':'1px solid '+C.border}}>
+          <div style=${{maxHeight:240,overflowY:'auto',WebkitOverflowScrolling:'touch'}}>
+          ${milestones.slice().reverse().map((m,i,arr)=>html`<div key=${m.date+m.title} style=${{display:'flex',alignItems:'flex-start',gap:12,padding:'12px 14px',borderBottom:i===arr.length-1?'none':'1px solid '+C.border}}>
             <div style=${{fontSize:11,fontWeight:700,color:C.muted,width:56,fontVariantNumeric:'tabular-nums',flexShrink:0,paddingTop:2}}>${m.date.split('-').slice(1).reverse().join('.')+'.'}</div>
             <div style=${{flex:1,minWidth:0}}>
               <div style=${{fontSize:13,fontWeight:600}}>${m.title}</div>
               <div style=${{fontSize:11,color:C.muted,marginTop:1,textTransform:'capitalize'}}>${m.category.replace('_',' ')}</div>
             </div>
           </div>`)}
+          </div>
         <//>
       `:null}
     </div>
