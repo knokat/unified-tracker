@@ -344,7 +344,7 @@ function planFromDate(date){
 function workoutName(day,plan){
   if(plan==='FH')return'Foundations';
   if(plan==='v1')return['Lower Body','Upper Body','Full Body'][day-1]||'Training';
-  if(plan==='v7')return['Stability + Pull','Squat + Push','Gym Compounds'][day-1]||'Training';
+  if(plan==='v7')return['H1: SL RDL + Abduction','H2: Split Squat + Hip Thrust + SLDL','G3: LH Squat + SL Ext'][day-1]||'Training';
   const names=['Hinge + Pull','Squat + Push',plan==='v6'?'Heavy Compounds + Shoulders':'Heavy Compounds + Rehab'];
   return names[day-1]||'Training';
 }
